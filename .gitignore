@@ -1,6 +1,6 @@
 # Scratch & Local tests
-scratch/
-scratch.py
+skratch/
+skratch.py
 
 # Python Cache
 __pycache__/
@@ -18,3 +18,18 @@ env/
 # OS generated files
 .DS_Store
 Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
+
+# Data & Heavy objects (Scientific Computing)
+*.npy
+*.npz
+*.pkl
+*.mat
+
+# Build & Distribution
+build/
+dist/
+*.egg-info/

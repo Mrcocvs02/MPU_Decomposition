@@ -3,12 +3,21 @@ MPU_Decomposition: A theoretical and numerical framework for
 Matrix-Product Unitaries and their quantum circuit synthesis.
 """
 
-from .checks import check_unitary, check_assumption_1
+# 1. Importa i sottomoduli per renderli accessibili come attributi (es. mpu_decomposition.utils)
+from . import utils
+from . import checks
+from . import MPU  # Assicurati che il file sia MPU.py (maiuscolo)
 
-# The __all__ list strictly defines the public API.
-# Only these functions will be imported when a user calls:
-# from mpu_decomposition import *
+# 2. Esponi le classi e funzioni principali direttamente al livello root
+from .MPU import UniformMPU
+from .checks import check_mpo_unitarity, check_assumption_1
+
+# 3. Aggiorna __all__ per includere la classe principale della tua tesi
 __all__ = [
-    "check_unitary", 
-    "check_assumption_1"
+    "UniformMPU",
+    "check_mpo_unitarity", 
+    "check_assumption_1",
+    "utils",
+    "checks",
+    "MPU"
 ]
