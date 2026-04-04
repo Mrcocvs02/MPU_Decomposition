@@ -16,45 +16,61 @@ def check_mpo_unitarity(
 
     # --- 1. Boundary Initialization ---
     # Defensive copies to prevent global state leakage
-    l_tensor = qtn.Tensor(l_in.copy(), inds=["bond_0"], tags=["l"])
-    r_tensor = qtn.Tensor(r_in.copy(), inds=["bond_0"], tags=["r"])
+    l_vec = qtn.Tensor(l_in.copy(), inds=["bond_0"], tags=["l"])
+    r_vec = qtn.Tensor(r_in.copy(), inds=["bond_0"], tags=["r"])
 
     # Adjoint boundaries for the double-layer contraction
-    l_dag = l_tensor.H.reindex({"bond_0": "bond_0_dag"}).retag({"l": "l*"})
-    r_dag = r_tensor.H.reindex({"bond_0": "bond_0_dag"}).retag({"r": "r*"})
+    l_vec_conj = l_vec.H.reindex({"bond_0": "bond_0_dag"}).retag({"l": "l*"})
+    r_vec_conj = r_vec.H.reindex({"bond_0": "bond_0_dag"}).retag({"r": "r*"})
 
     # The 'store' represents the accumulated Transfer Matrix environment
-    store = l_tensor & l_dag
+    signle_store = l_vec & l_vec_conj
+    double_store = (
+        l_vec
+        & l_vec_conj
+        & l_vec.reindex({"bond_0": f"bond_{N_max+1}"})
+        & l_vec_conj.reindex({"bond_0_dag": f"bond_{N_max+1}_dag"})
+    )
     failed_orders = []
 
     # --- 2. Iterative Site Evaluation ---
     for N in range(1, N_max + 1):
         # Update local right boundaries for current chain length N
-        r_loc = r_tensor.reindex({"bond_0": f"bond_{N}"})
-        r_dag_loc = r_dag.reindex({"bond_0_dag": f"bond_{N}_dag"})
+        r_loc = r_vec.reindex({"bond_0": f"bond_{N}"})
+        r_loc_dag = r_vec_conj.reindex({"bond_0_dag": f"bond_{N}_dag"})
 
         # Get MPO site and its conjugate
         A_k, A_k_dag = get_mpo_site_tensors(N, A_np)
-        store @= A_k @ A_k_dag
+        signle_store &= A_k & A_k_dag.reindex({f"p_out_f_{N}": f"p_in_{N}"})
+
+        A_k_double, A_k_dag_double = get_mpo_site_tensors(N + N_max + 1, A_np)
+        double_store &= (
+            A_k
+            & A_k_dag.reindex({f"p_out_f_{N}": f"p_middle_{N}"})
+            & A_k_double.reindex({f"p_in_{N+N_max+1}": f"p_middle_{N}"})
+            & A_k_dag_double.reindex({f"p_out_f_{N+N_max+1}": f"p_in_{N}"})
+        )
 
         # UU_dag represents the full MPO chain closed by the boundary vectors
-        UU_dag = store @ r_loc @ r_dag_loc
+        UU_dag = signle_store.copy() & r_loc & r_loc_dag
 
         # --- A. Compute Numerator: (Tr[U U^dagger])^2 ---
         # Close the physical indices to compute the trace
-        trace_net = UU_dag.reindex({f"p_in_{N}": f"p_out_f_{N}"})
-        val_tr = trace_net.contract()
+        val_tr = UU_dag.contract()
         numerator = val_tr**2
 
         # --- B. Compute Denominator: d * Tr[(U U^dagger)^2] ---
         # Swap indices to connect two copies of the chain for the Tr(rho^2) term
-        UU_dag_swapped = (
-            UU_dag.reindex({f"p_in_{N}": f"dummy_{N}"})
-            .reindex({f"p_out_f_{N}": f"p_in_{N}"})
-            .reindex({f"dummy_{N}": f"p_out_f_{N}"})
+        UU_double = (
+            double_store
+            & r_loc
+            & r_loc_dag
+            & r_vec.reindex({"bond_0": f"bond_{N+N_max+1}"})
+            & r_vec_conj.reindex({"bond_0_dag": f"bond_{N+N_max+1}_dag"})
         )
+
         # Scale by physical dimension d = A_np.shape[0]
-        denominator = A_np.shape[0] * (UU_dag & UU_dag_swapped).contract()
+        denominator = A_np.shape[0] ** N * UU_double.contract()
 
         # --- C. Numerical Evaluation ---
         try:
@@ -76,11 +92,6 @@ def check_mpo_unitarity(
                 if verbose:
                     print(f"CRITICAL: Unitarity lost at N={N}. Stopping.")
                 break
-
-        # --- 3. Environment Update ---
-        # Move to next site: contract physical indices and normalize to prevent overflow
-        store = store.reindex({f"p_out_f_{N}": f"p_in_{N}"}).contract()
-        store /= store.norm()
 
     return failed_orders == []
 

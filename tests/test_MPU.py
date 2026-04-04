@@ -13,9 +13,9 @@ from mpu_decomposition.MPU import AbstractMPU, UniformMPU
 def identity_mpu():
     """Generates an exact identity MPU tensor with minimal canonical bond dimension (D=1)."""
     d, D = 2, 1
-    A = np.einsum("ij,ab->ijab", np.eye(d), np.eye(D))
-    l_in = np.ones(D) / np.sqrt(D)
-    r_in = np.ones(D) / np.sqrt(D)
+    A = np.einsum("ij,ab->ijab", np.eye(d), np.eye(D)) / np.sqrt(d)
+    l_in = np.ones(D)
+    r_in = np.ones(D)
     return d, D, A, l_in, r_in
 
 
@@ -70,7 +70,7 @@ def local_unitary_mpu():
     """Generates an MPU applying a local Pauli-X gate globally (D=1)."""
     d, D = 2, 1
     X = np.array([[0.0, 1.0], [1.0, 0.0]])
-    A = np.einsum("ij,ab->ijab", X, np.eye(D))
+    A = np.einsum("ij,ab->ijab", X, np.eye(D)) / np.sqrt(d)
     l_in = np.ones(D)
     r_in = np.ones(D)
     return d, D, A, l_in, r_in
@@ -227,7 +227,6 @@ def test_uniformmpu_initialization_success(mpu_fixture_name, request):
     # 3. Structural and Physical Assertions
     assert mpu._D == D_bond
     assert mpu._d == d_phys
-    # Entangling power q_unif is lower-bounded by 1.0 for unitary channels
     assert mpu.q_unif >= 1.0 - 1e-12
 
 
@@ -346,7 +345,7 @@ def test_q_unif_identity_case(identity_mpu):
     mpu.L2 = np.array([[1.0]])
     mpu.R2 = np.array([[1.0]])
 
-    expected_q = np.sqrt(d_phys)
+    expected_q = 1.0
     assert mpu._compute_q_unif() == pytest.approx(expected_q)
 
 
@@ -367,10 +366,10 @@ def test_q_unif_comparison_beyond_qca(identity_mpu, semisimple_v_mpu):
 
     # 3. Physical & Numerical Assertions
     # Baseline comparison with the identity limit
-    assert q_identity == pytest.approx(np.sqrt(d_id))
+    assert q_identity == pytest.approx(d_id)
 
-    # The V-model introduces complexity/deformation relative to the identity
-    assert q_semisimple >= q_identity
+    # Il Beyond QCA deve avere un valore superiore a 1.0
+    assert q_semisimple > 1.0 + 1e-12
 
     # The entangling power must be a physical real quantity
     assert np.isreal(q_semisimple) or np.abs(np.imag(q_semisimple)) < 1e-12

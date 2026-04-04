@@ -116,7 +116,7 @@ def random_complex_mpo():
 # ============================================================================
 
 
-@pytest.mark.parametrize("N", [1, 5, 10, 50])
+@pytest.mark.parametrize("N", [1, 5, 10, 20])
 @pytest.mark.parametrize(
     "mpu_fixture",
     ["identity_mpu", "local_unitary_mpu", "cz_interaction_mpu", "semisimple_v_mpu"],

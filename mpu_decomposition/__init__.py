@@ -1,5 +1,5 @@
 """
-MPU_Decomposition: A theoretical and numerical framework for 
+MPU_Decomposition: A theoretical and numerical framework for
 Matrix-Product Unitaries and their quantum circuit synthesis.
 """
 
@@ -11,13 +11,16 @@ from . import MPU  # Assicurati che il file sia MPU.py (maiuscolo)
 # 2. Esponi le classi e funzioni principali direttamente al livello root
 from .MPU import UniformMPU
 from .checks import check_mpo_unitarity, check_assumption_1
+from .utils import get_mpo_site_tensors, optimize_q_unif
 
 # 3. Aggiorna __all__ per includere la classe principale della tua tesi
 __all__ = [
     "UniformMPU",
-    "check_mpo_unitarity", 
+    "check_mpo_unitarity",
+    "get_mpo_site_tensors",
+    "optimize_q_unif",
     "check_assumption_1",
     "utils",
     "checks",
-    "MPU"
+    "MPU",
 ]
