@@ -90,3 +90,16 @@ def get_mpo_site_tensors(k, A_np):
     )
 
     return A_k, A_k_dag
+
+
+def matrix_sqrt_hermitian(M: np.ndarray, tol: float = 1e-12) -> np.ndarray:
+    """Compute M^{1/2} for a Hermitian positive-semidefinite matrix."""
+    eigvals, eigvecs = np.linalg.eigh(M)
+    if np.any(eigvals < -tol):
+        raise ValueError(
+            f"Matrix is not positive-semidefinite: min eigenvalue = {eigvals.min():.2e}"
+        )
+    eigvals = np.maximum(
+        eigvals, 0.0
+    )  # to erase small negative eigenvalues due to numerical errors
+    return eigvecs @ np.diag(np.sqrt(eigvals)) @ eigvecs.conj().T

@@ -2,7 +2,7 @@ import pytest
 import numpy as np
 import quimb.tensor as qtn
 from unittest.mock import patch
-from mpu_decomposition.MPU import AbstractMPU, UniformMPU
+from mpu_decomposition.MPU import CircuitDecomposition, UniformMPU
 
 # =====================================================================
 # Fixtures
@@ -108,11 +108,12 @@ def random_complex_mpu():
 
 def test_abstract_instantiation_fails():
     """
-    Verifies that the base AbstractMPU class cannot be instantiated directly.
+    Verifies that the base CircuitDecomposition class cannot be instantiated directly.
     """
-    # Attempting to instantiate an abstract class should raise a TypeError
-    with pytest.raises(TypeError, match="Can't instantiate abstract class AbstractMPU"):
-        AbstractMPU(N=4, d=2, l_vec=qtn.Tensor(), r_vec=qtn.Tensor())
+    with pytest.raises(
+        TypeError, match="Can't instantiate abstract class CircuitDecomposition"
+    ):
+        CircuitDecomposition(N=4, d=2, l_vec=qtn.Tensor(), r_vec=qtn.Tensor())
 
 
 # =====================================================================
@@ -296,8 +297,8 @@ def test_q_unif_dimension_mismatch(identity_mpu):
         mpu = UniformMPU(bulk_tensor, l_in, r_in, N=2)
 
     # Inject mismatched boundary operators
-    mpu.L2 = np.eye(2)
-    mpu.R2 = np.eye(3)
+    mpu.L_inv = np.eye(2)
+    mpu.R_inv = np.eye(3)
 
     with pytest.raises(ValueError, match="Dimension mismatch"):
         mpu._compute_q_unif()
@@ -319,8 +320,8 @@ def test_q_unif_unphysical_negative_trace(identity_mpu):
         mpu = UniformMPU(bulk_tensor, l_in, r_in, N=2)
 
     # Force a negative trace scenario (D=1 for Identity)
-    mpu.L2 = np.array([[1.0]])
-    mpu.R2 = np.array([[-1.0]])
+    mpu.L = np.array([[1.0]])
+    mpu.R = np.array([[-1.0]])
 
     with pytest.raises(ValueError, match="Unphysical negative trace"):
         mpu._compute_q_unif()
@@ -342,8 +343,8 @@ def test_q_unif_identity_case(identity_mpu):
         mpu = UniformMPU(bulk_tensor, l_in, r_in, N=4)
 
     # Set canonical identity boundary operators (D=1)
-    mpu.L2 = np.array([[1.0]])
-    mpu.R2 = np.array([[1.0]])
+    mpu.L = np.array([[1.0]])
+    mpu.R = np.array([[1.0]])
 
     expected_q = 1.0
     assert mpu._compute_q_unif() == pytest.approx(expected_q)
@@ -386,8 +387,8 @@ def test_q_unif_ill_conditioned_matrix(identity_mpu):
     ):
         mpu = UniformMPU(A, l_in, r_in, N=4)
 
-    mpu.L2 = np.array([[1.0, 0.0], [0.0, 1e-20]])
-    mpu.R2 = np.eye(d)
+    mpu.L = np.array([[1.0, 0.0], [0.0, 1e-20]])
+    mpu.R = np.eye(d)
     q_val = mpu._compute_q_unif()
     assert isinstance(q_val, float)
     assert not np.isnan(q_val)
