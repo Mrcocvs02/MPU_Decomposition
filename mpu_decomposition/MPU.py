@@ -273,6 +273,7 @@ class UniformMPU(CircuitDecomposition):
         self.L_inv = np.linalg.inv(self.L)
         self.R_inv = np.linalg.inv(self.R)
 
+        self._lcu_cache = None
         self.q_unif = self._compute_q_unif()
 
     def _compute_boundary_operators(self) -> tuple[np.ndarray, np.ndarray]:
@@ -393,8 +394,11 @@ class UniformMPU(CircuitDecomposition):
         """
         if self._lcu_cache is None:
             self._lcu_cache = CircuitDecomposition._build_lcu_data(
-                self._R_inv, self._L_inv
+                self._D,
+                self.R_inv,
+                self.L_inv,  # CORRETTO
             )
+        return self._lcu_cache
 
     def synthesize(self) -> qtn.TensorNetwork:
         """
