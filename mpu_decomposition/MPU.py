@@ -174,6 +174,51 @@ class CircuitDecomposition(ABC):
 
         return all_coeffs, all_U_R, all_U_L, C, target
 
+    @staticmethod
+    def _construct_lcu_unitary(target, U_R_list, U_L_list):
+        """
+        Constructs the global block-encoding unitary U = (B† ⊗ I) W_ctrl (B ⊗ I).
+
+        Args:
+            target (np.ndarray): The target vector for ancilla preparation (c_i coefficients).
+            U_R_list (list): List of unitary operators acting on the right part of the system.
+            U_L_list (list): List of unitary operators acting on the left part of the system.
+
+        Returns:
+            np.ndarray: The global unitary U of shape (d_anc * d_sys, d_anc * d_sys).
+        """
+        d_anc = len(target)
+        # Each block is np.kron(Ur, Ul), so d_sys is the product of their dimensions
+        d_sys = U_R_list[0].shape[0] * U_L_list[0].shape[0]
+
+        # --- 1. Ancilla Preparation Operator B ---
+        # We use a randomized QR approach to find an orthonormal basis
+        # where the first column is exactly 'target'.
+        A_mat = np.random.randn(d_anc, d_anc) + 1j * np.random.randn(d_anc, d_anc)
+        A_mat[:, 0] = target
+        Q, R_qr = np.linalg.qr(A_mat)
+
+        # Phase correction to ensure B[:, 0] == target
+        # This aligns the internal QR phases with the physical target vector
+        r_diag = np.diag(R_qr)
+        phases = r_diag / np.abs(r_diag)
+        B = Q @ np.diag(phases)
+
+        # --- 2. Select Operator (W_ctrl) ---
+        # W_ctrl = sum_i |i><i|_A ⊗ (Ur_i ⊗ Ul_i)
+        # block_diag creates this sum-of-blocks structure efficiently
+        blocks = [np.kron(Ur, Ul) for Ur, Ul in zip(U_R_list, U_L_list)]
+        W_ctrl = la.block_diag(*blocks)
+
+        # --- 3. Global Transformation ---
+        # Expand B to the full Hilbert space: B_full = B ⊗ Identity_system
+        B_full = np.kron(B, np.eye(d_sys))
+
+        # U = B_full.H @ W_ctrl @ B_full
+        U = B_full.conj().T @ W_ctrl @ B_full
+
+        return U
+
     @abstractmethod
     def synthesize(self) -> qtn.TensorNetwork:
         pass
@@ -399,6 +444,16 @@ class UniformMPU(CircuitDecomposition):
                 self.L_inv,  # CORRETTO
             )
         return self._lcu_cache
+
+    def _construct_lcu_unitary(self):
+        """
+        Constructs the global block-encoding unitary U = (B† ⊗ I) W_ctrl (B ⊗ I).
+        """
+        if self.U is None:
+            self.U = CircuitDecomposition._construct_lcu_unitary(
+                self._lcu_cache[3], self._lcu_cache[1], self._lcu_cache[2]
+            )  # target, U_R_list, U_L_list
+        return self.U
 
     def synthesize(self) -> qtn.TensorNetwork:
         """
