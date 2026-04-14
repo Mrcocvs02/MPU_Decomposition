@@ -23,5 +23,6 @@ __all__ = [
     "utils",
     "checks",
     "matrix_sqrt_hermitian",
+    "verify_factored_decomposition",
     "MPU",
 ]

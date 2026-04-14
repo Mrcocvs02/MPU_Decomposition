@@ -131,3 +131,26 @@ def check_assumption_1(
     is_right_ok = np.sum(s_right > tol) == D
 
     return is_left_ok and is_right_ok, s_left, s_right
+
+
+def verify_factored_decomposition(M_factors, h_R, h_L, basis_R, basis_L):
+    """Verify reconstruction using uncollected h_R, h_L."""
+    dim_R = basis_R[0].shape[0]
+    dim_L = basis_L[0].shape[0]
+    n_bonds = h_R.shape[0]
+
+    M_direct = np.zeros((dim_R * dim_L, dim_R * dim_L), dtype=complex)
+    for F_R, F_L in M_factors:
+        M_direct += np.kron(F_R, F_L)
+
+    M_recon = np.zeros_like(M_direct)
+    for m in range(n_bonds):
+        for i, W_R in enumerate(basis_R):
+            if abs(h_R[m, i]) < 1e-15:
+                continue
+            for j, W_L in enumerate(basis_L):
+                c = h_R[m, i] * h_L[m, j]
+                if abs(c) > 1e-15:
+                    M_recon += c * np.kron(W_R, W_L)
+
+    return np.linalg.norm(M_direct - M_recon)
