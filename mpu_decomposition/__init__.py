@@ -11,7 +11,15 @@ from . import MPU  # Assicurati che il file sia MPU.py (maiuscolo)
 # 2. Esponi le classi e funzioni principali direttamente al livello root
 from .MPU import UniformMPU
 from .checks import check_mpo_unitarity, check_assumption_1
-from .utils import get_mpo_site_tensors, optimize_q_unif, matrix_sqrt_hermitian
+from .utils import (
+    get_mpo_site_tensors,
+    optimize_q_unif,
+    matrix_sqrt_hermitian,
+    build_merge_factors,
+    factored_lcu_decomposition,
+    pauli_basis,
+    get_merging_operator,
+)
 
 # 3. Aggiorna __all__ per includere la classe principale della tua tesi
 __all__ = [
@@ -24,5 +32,9 @@ __all__ = [
     "checks",
     "matrix_sqrt_hermitian",
     "verify_factored_decomposition",
+    "build_merge_factors",
+    "factored_lcu_decomposition",
+    "get_merging_operator",
+    "pauli_basis",
     "MPU",
 ]

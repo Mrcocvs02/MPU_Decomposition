@@ -9,59 +9,27 @@ from mpu_decomposition.MPU import CircuitDecomposition, UniformMPU
 def identity_lcu_data(identity_mpu):
     d, D, A, l_in, r_in = identity_mpu
     mpu = UniformMPU(A=A, l_vec=l_in, r_vec=r_in, N=4)
-    coeffs, U_R, U_L, C, target = CircuitDecomposition._build_lcu_data(
-        D, mpu.R_inv, mpu.L_inv
-    )
-    return D, coeffs, U_R, U_L, C, target, mpu
+    h_R, h_L, basis_R, basis_L, labels_R, labels_L, C = mpu._build_lcu_data()
+    return D, h_R, h_L, basis_R, basis_L, labels_R, labels_L, C, mpu
 
 
 @pytest.fixture(scope="module")
 def cz_lcu_data(cz_interaction_mpu):
     d, D, A, l_in, r_in = cz_interaction_mpu
     mpu = UniformMPU(A=A, l_vec=l_in, r_vec=r_in, N=4)
-    coeffs, U_R, U_L, C, target = CircuitDecomposition._build_lcu_data(
-        D, mpu.R_inv, mpu.L_inv
-    )
-    return D, coeffs, U_R, U_L, C, target, mpu
+    h_R, h_L, basis_R, basis_L, labels_R, labels_L, C = mpu._build_lcu_data()
+    return D, h_R, h_L, basis_R, basis_L, labels_R, labels_L, C, mpu
 
 
 @pytest.fixture(scope="module")
 def semisimple_lcu_data(semisimple_v_mpu):
     d, D, A, l_in, r_in = semisimple_v_mpu
     mpu = UniformMPU(A=A, l_vec=l_in, r_vec=r_in, N=4)
-    coeffs, U_R, U_L, C, target = CircuitDecomposition._build_lcu_data(
-        D, mpu.R_inv, mpu.L_inv
-    )
-    return D, coeffs, U_R, U_L, C, target, mpu
-
-
-@pytest.fixture(scope="module")
-def identity_lcu_unitary(identity_lcu_data):
-    D, coeffs, U_R, U_L, C, target, mpu = identity_lcu_data
-    np.random.seed(0)
-    U = CircuitDecomposition._construct_lcu_unitary(target, U_R, U_L)
-    return D, coeffs, U_R, U_L, C, target, mpu, U
-
-
-@pytest.fixture(scope="module")
-def cz_lcu_unitary(cz_lcu_data):
-    D, coeffs, U_R, U_L, C, target, mpu = cz_lcu_data
-    np.random.seed(0)
-    U = CircuitDecomposition._construct_lcu_unitary(target, U_R, U_L)
-    return D, coeffs, U_R, U_L, C, target, mpu, U
-
-
-@pytest.fixture(scope="module")
-def semisimple_lcu_unitary(semisimple_lcu_data):
-    D, coeffs, U_R, U_L, C, target, mpu = semisimple_lcu_data
-    np.random.seed(0)
-    U = CircuitDecomposition._construct_lcu_unitary(target, U_R, U_L)
-    return D, coeffs, U_R, U_L, C, target, mpu, U
+    h_R, h_L, basis_R, basis_L, labels_R, labels_L, C = mpu._build_lcu_data()
+    return D, h_R, h_L, basis_R, basis_L, labels_R, labels_L, C, mpu
 
 
 ALL_LCU_DATA = ["identity_lcu_data", "cz_lcu_data", "semisimple_lcu_data"]
-ALL_LCU_UNITARIES = ["identity_lcu_unitary", "cz_lcu_unitary", "semisimple_lcu_unitary"]
-
 # =====================================================================
 # Group 1: Abstract Base Class Constraints
 # =====================================================================
@@ -339,330 +307,154 @@ def test_q_unif_comparison_beyond_qca(identity_mpu, semisimple_v_mpu):
 
 
 # =====================================================================
-# Group 5: Merging Operator Creation
-# =====================================================================
-
-
-def test_merging_operator_kernel_value(identity_mpu):
-    """
-    For identity MPU (D=1), M[0,0,:,:] must equal R_inv.T @ L_inv exactly.
-    """
-    d, D, A, l_in, r_in = identity_mpu
-    mpu = UniformMPU(A=A, l_vec=l_in, r_vec=r_in, N=4)
-
-    M = mpu.get_merging_operator()
-    expected_kernel = mpu.R_inv.T @ mpu.L_inv
-
-    assert np.allclose(M[0, 0, :, :], expected_kernel, atol=1e-12)
-
-
-def test_merging_operator_only_00_nonzero(cz_interaction_mpu):
-    """
-    By definition, only the M[0,0,:,:] block carries the kernel.
-    All other slices must be exactly zero.
-    """
-    d, D, A, l_in, r_in = cz_interaction_mpu
-    mpu = UniformMPU(A=A, l_vec=l_in, r_vec=r_in, N=4)
-
-    M = mpu.get_merging_operator()
-
-    for i in range(D):
-        for j in range(D):
-            if i == 0 and j == 0:
-                continue
-            assert np.allclose(
-                M[i, j, :, :], 0.0, atol=1e-15
-            ), f"M[{i},{j},:,:] is nonzero"
-
-
-def test_merging_operator_nonsquare_raises():
-    """
-    Passing rectangular matrices must raise ValueError.
-    """
-    L_inv = np.ones((2, 3))
-    R_inv = np.ones((2, 3))
-
-    with pytest.raises(ValueError, match="square matrices"):
-        CircuitDecomposition.get_merging_operator(L_inv, R_inv)
-
-
-def test_merging_operator_dimension_mismatch_raises():
-    """
-    Passing square matrices of different sizes must raise ValueError.
-    """
-    L_inv = np.eye(2)
-    R_inv = np.eye(3)
-
-    with pytest.raises(ValueError, match="same dimension"):
-        CircuitDecomposition.get_merging_operator(L_inv, R_inv)
-
-
-@pytest.mark.parametrize(
-    "mpu_fixture",
-    ["identity_mpu", "cz_interaction_mpu", "semisimple_v_mpu"],
-)
-def test_merging_operator_complex_dtype(mpu_fixture, request):
-    """
-    Output must always be complex regardless of input dtype.
-    """
-    d, D, A, l_in, r_in = request.getfixturevalue(mpu_fixture)
-    mpu = UniformMPU(A=A, l_vec=l_in, r_vec=r_in, N=4)
-
-    M = mpu.get_merging_operator()
-    assert np.iscomplexobj(M)
-
-
-# =====================================================================
-# Group 6: LCU Decomposition
+# Group 5: Factored Pauli LCU Decomposition
 # =====================================================================
 
 
 @pytest.mark.parametrize("lcu_fixture", ALL_LCU_DATA)
-def test_lcu_coefficients_nonnegative(lcu_fixture, request):
-    """
-    All LCU coefficients must be non-negative reals.
-    """
-    D, coeffs, U_R, U_L, C, target, mpu = request.getfixturevalue(lcu_fixture)
+def test_lcu_h_shapes_consistent(lcu_fixture, request):
+    """h_R and h_L must have shape (D, n_paulis) where n_paulis = 4^n_anc."""
+    D, h_R, h_L, basis_R, basis_L, labels_R, labels_L, C, mpu = request.getfixturevalue(
+        lcu_fixture
+    )
+    n_bonds = h_R.shape[0]
+    assert n_bonds == D, f"Expected {D} bond terms, got {n_bonds}"
+    assert h_R.shape[0] == h_L.shape[0]
+    assert h_R.shape[1] == len(basis_R)
+    assert h_L.shape[1] == len(basis_L)
 
-    assert np.all(coeffs >= -1e-15), f"Negative coefficient found: {coeffs.min()}"
-    assert np.all(np.isreal(coeffs))
+
+@pytest.mark.parametrize("lcu_fixture", ALL_LCU_DATA)
+def test_lcu_pauli_basis_size(lcu_fixture, request):
+    """Pauli basis must have 4^n elements for n = ceil(log2(D))."""
+    D, h_R, h_L, basis_R, basis_L, labels_R, labels_L, C, mpu = request.getfixturevalue(
+        lcu_fixture
+    )
+    import math
+
+    n_anc = max(1, math.ceil(math.log2(D)))
+    expected_size = 4**n_anc
+    assert len(basis_R) == expected_size
+    assert len(basis_L) == expected_size
+    assert len(labels_R) == expected_size
+    assert len(labels_L) == expected_size
 
 
 @pytest.mark.parametrize("lcu_fixture", ALL_LCU_DATA)
 def test_lcu_normalization_constant(lcu_fixture, request):
-    """
-    C must equal the sum of all coefficients.
-    """
-    D, coeffs, U_R, U_L, C, target, mpu = request.getfixturevalue(lcu_fixture)
-
-    assert C == pytest.approx(np.sum(coeffs), abs=1e-12)
-
-
-@pytest.mark.parametrize("lcu_fixture", ALL_LCU_DATA)
-def test_lcu_target_normalized(lcu_fixture, request):
-    """
-    The state preparation vector must have unit norm.
-    """
-    D, coeffs, U_R, U_L, C, target, mpu = request.getfixturevalue(lcu_fixture)
-
-    assert np.linalg.norm(target) == pytest.approx(1.0, abs=1e-12)
+    """C must equal Σ_m (Σ_i |h_R[m,i]|)(Σ_j |h_L[m,j]|)."""
+    D, h_R, h_L, basis_R, basis_L, labels_R, labels_L, C, mpu = request.getfixturevalue(
+        lcu_fixture
+    )
+    C_recomputed = sum(
+        np.sum(np.abs(h_R[m])) * np.sum(np.abs(h_L[m])) for m in range(h_R.shape[0])
+    )
+    assert C == pytest.approx(C_recomputed, abs=1e-12)
 
 
 @pytest.mark.parametrize("lcu_fixture", ALL_LCU_DATA)
-def test_lcu_padded_dimension_power_of_two(lcu_fixture, request):
-    """
-    The ancilla dimension d_anc must be a power of two.
-    """
-    D, coeffs, U_R, U_L, C, target, mpu = request.getfixturevalue(lcu_fixture)
-
-    d_anc = len(coeffs)
-    assert d_anc > 0
-    assert (d_anc & (d_anc - 1)) == 0, f"d_anc={d_anc} is not a power of 2"
+def test_lcu_C_positive(lcu_fixture, request):
+    """The LCU 1-norm must be strictly positive."""
+    D, h_R, h_L, basis_R, basis_L, labels_R, labels_L, C, mpu = request.getfixturevalue(
+        lcu_fixture
+    )
+    assert C > 0
 
 
 @pytest.mark.parametrize("lcu_fixture", ALL_LCU_DATA)
-def test_lcu_nonpadded_count(lcu_fixture, request):
+def test_lcu_reconstruction_from_paulis(lcu_fixture, request):
     """
-    Exactly D^3 terms must carry nonzero coefficients (before padding).
+    Σ_{m,i,j} h_R[m,i] h_L[m,j] (P_i ⊗ P_j) must reconstruct the merging operator.
     """
-    D, coeffs, U_R, U_L, C, target, mpu = request.getfixturevalue(lcu_fixture)
+    D, h_R, h_L, basis_R, basis_L, labels_R, labels_L, C, mpu = request.getfixturevalue(
+        lcu_fixture
+    )
+    import math
 
-    N_real = D**3
-    assert np.sum(np.abs(coeffs[:N_real]) > 1e-15) == N_real
+    n_anc = max(1, math.ceil(math.log2(D)))
+    dim = 2**n_anc  # padded dimension
+
+    M_reconstructed = np.zeros((dim * dim, dim * dim), dtype=complex)
+    for m in range(h_R.shape[0]):
+        for i in range(h_R.shape[1]):
+            if np.abs(h_R[m, i]) < 1e-18:
+                continue
+            for j in range(h_L.shape[1]):
+                if np.abs(h_L[m, j]) < 1e-18:
+                    continue
+                M_reconstructed += (
+                    h_R[m, i] * h_L[m, j] * np.kron(basis_R[i], basis_L[j])
+                )
+
+    # Compare against the dense merge operator (padded to dim x dim)
+    M_ref_raw = mpu.get_merging_operator()  # (D, D, D, D)
+    M_ref = np.zeros((dim, dim, dim, dim), dtype=complex)
+    M_ref[:D, :D, :D, :D] = M_ref_raw
+    M_ref = M_ref.reshape(dim * dim, dim * dim)
+
+    assert np.allclose(
+        M_reconstructed, M_ref, atol=1e-8
+    ), f"Pauli reconstruction error: {np.max(np.abs(M_reconstructed - M_ref)):.2e}"
 
 
-def test_lcu_d1_trivial(identity_lcu_data):
-    """
-    D=1: single non-padded term, scalar coefficient, 1x1 unitaries.
-    """
-    D, coeffs, U_R, U_L, C, target, mpu = identity_lcu_data
-    assert D == 1
-    assert np.abs(coeffs[0]) > 1e-15
-    assert U_R[0].shape == (1, 1)
-    assert U_L[0].shape == (1, 1)
-    assert len(coeffs) >= 2
-    assert coeffs[1] == pytest.approx(0.0, abs=1e-15)
+@pytest.mark.parametrize("lcu_fixture", ALL_LCU_DATA)
+def test_lcu_pauli_bases_are_hermitian_unitary(lcu_fixture, request):
+    """Every Pauli basis element must be Hermitian and unitary."""
+    D, h_R, h_L, basis_R, basis_L, labels_R, labels_L, C, mpu = request.getfixturevalue(
+        lcu_fixture
+    )
+    for label, P in zip(labels_R, basis_R):
+        dim = P.shape[0]
+        Id = np.eye(dim)
+        assert np.allclose(P, P.conj().T, atol=1e-14), f"{label} not Hermitian"
+        assert np.allclose(P @ P, Id, atol=1e-14), f"{label} not involutory"
 
 
 # =====================================================================
-# Group 7: UniformMPU LCU Integration & Caching
+# Group 6: UniformMPU LCU Integration & Caching
 # =====================================================================
 
 
 def test_uniformmpu_build_lcu_success(cz_interaction_mpu):
-    """
-    Verifies that _build_lcu_data correctly generates the tuple of data
-    """
+    """_build_lcu_data returns a 7-tuple with correct types."""
     d, D, A, l_in, r_in = cz_interaction_mpu
     mpu = UniformMPU(A=A, l_vec=l_in, r_vec=r_in, N=4)
 
-    # La chiamata ora deve avere successo e restituire i dati
     res = mpu._build_lcu_data()
     assert res is not None
 
-    coeffs, U_R, U_L, C, target = res
-    assert len(coeffs) >= D**3
-    assert len(U_R) == len(coeffs)
-    assert len(U_L) == len(coeffs)
+    h_R, h_L, basis_R, basis_L, labels_R, labels_L, C = res
+    assert h_R.shape[0] == D
+    assert h_L.shape[0] == D
+    assert isinstance(C, float)
+    assert C > 0
 
 
 def test_uniformmpu_lcu_caching(cz_interaction_mpu):
-    """
-    Verifies that multiple calls to _build_lcu_data do not recalculate
-    the SVD decomposition, but instead return the cached data.
-    """
+    """Multiple calls return the same cached object."""
     d, D, A, l_in, r_in = cz_interaction_mpu
     mpu = UniformMPU(A=A, l_vec=l_in, r_vec=r_in, N=4)
 
-    # First call should instantiate the cache
     res1 = mpu._build_lcu_data()
-    # Second one should simply return the cache
     res2 = mpu._build_lcu_data()
-
-    # 'is' verifies that they are the same object in memory
     assert res1 is res2
 
 
 # =====================================================================
-# Group 8: LCU Block Encoding and Norms
+# Group 7: Unitary U of LCU
 # =====================================================================
-
-
-@pytest.mark.parametrize("lcu_unitary_fixture", ALL_LCU_UNITARIES)
-def test_lcu_norms(lcu_unitary_fixture, request):
-    r"""
-    Explicitly tests Equation (12) from the paper:
-    U |0>_A |ψ>_S = (1/C)|0>_A M|ψ>_S + sqrt{1 - 1/C^2}|Φ^⊥>
-    """
-    D, coeffs, U_R, U_L, C, target, mpu, U = request.getfixturevalue(
-        lcu_unitary_fixture
-    )
-    d_sys = U_R[0].shape[0] * U_L[0].shape[0]
-    d_anc = len(target)
-
-    M_ref = mpu.get_merging_operator().reshape(d_sys, d_sys)
-
-    # Random normalized system state
-    np.random.seed(42)
-    psi_S = np.random.randn(d_sys) + 1j * np.random.randn(d_sys)
-    psi_S /= np.linalg.norm(psi_S)
-
-    e0_A = np.zeros(d_anc)
-    e0_A[0] = 1.0
-    psi_in = np.kron(e0_A, psi_S)
-
-    psi_out = U @ psi_in
-    psi_out_reshaped = psi_out.reshape(d_anc, d_sys)
-
-    # Success branch: ancilla postselected on |0>
-    success_vector = psi_out_reshaped[0, :]
-    expected_success = (M_ref @ psi_S) / C
-
-    assert np.allclose(
-        success_vector, expected_success, atol=1e-10
-    ), f"[{lcu_unitary_fixture}] Success vector mismatch"
-
-    # Failure branch: probability conservation
-    norm_success = np.linalg.norm(success_vector)
-    failure_matrix = np.copy(psi_out_reshaped)
-    failure_matrix[0, :] = 0
-    norm_failure = np.linalg.norm(failure_matrix)
-    expected_norm_failure = np.sqrt(np.maximum(0.0, 1.0 - norm_success**2))
-
-    assert np.isclose(
-        norm_failure, expected_norm_failure, atol=1e-10
-    ), f"[{lcu_unitary_fixture}] Failure norm mismatch"
-
-
-@pytest.mark.parametrize("lcu_unitary_fixture", ALL_LCU_UNITARIES)
-def test_lcu_unitary_block_encodes_merging_operator(lcu_unitary_fixture, request):
-    """<0|_anc U |0>_anc must equal (1/C) * sum_k c_k (U_R_k ⊗ U_L_k)."""
-    D, coeffs, U_R, U_L, C, target, mpu, U = request.getfixturevalue(
-        lcu_unitary_fixture
-    )
-    d_sys = U_R[0].shape[0] * U_L[0].shape[0]
-
-    U_block = U[:d_sys, :d_sys]
-
-    M_lcu = np.zeros((d_sys, d_sys), dtype=complex)
-    for k in range(len(coeffs)):
-        if np.abs(coeffs[k]) < 1e-18:
-            continue
-        M_lcu += coeffs[k] * np.kron(U_R[k], U_L[k])
-
-    assert np.allclose(
-        U_block, M_lcu / C, atol=1e-8
-    ), f"Block encoding error: {np.max(np.abs(U_block - M_lcu / C)):.2e}"
-
-
-# =====================================================================
-# Group 9: Unitary U of LCU
-# =====================================================================
-
-
-@pytest.mark.parametrize("lcu_fixture", ALL_LCU_DATA)
-def test_lcu_unitaries_are_unitary(lcu_fixture, request):
-    """Every U_R_k and U_L_k must satisfy U @ U† = I."""
-    D, coeffs, U_R, U_L, C, target, mpu = request.getfixturevalue(lcu_fixture)
-    I_D = np.eye(D, dtype=complex)
-    for k, (Ur, Ul) in enumerate(zip(U_R, U_L)):
-        assert np.allclose(Ur @ Ur.conj().T, I_D, atol=1e-10), f"U_R[{k}] not unitary"
-        assert np.allclose(Ul @ Ul.conj().T, I_D, atol=1e-10), f"U_L[{k}] not unitary"
-
-
-@pytest.mark.parametrize("lcu_fixture", ALL_LCU_DATA)
-def test_lcu_padded_entries(lcu_fixture, request):
-    """Padded entries beyond D^3 must have zero coefficients and identity unitaries."""
-    D, coeffs, U_R, U_L, C, target, mpu = request.getfixturevalue(lcu_fixture)
-    N_real = D**3
-    I_D = np.eye(D, dtype=complex)
-    d_anc = len(coeffs)
-    assert (d_anc & (d_anc - 1)) == 0, f"d_anc={d_anc} not power of 2"
-    for k in range(N_real, len(coeffs)):
-        assert coeffs[k] == pytest.approx(0.0, abs=1e-15)
-        assert np.allclose(U_R[k], I_D, atol=1e-15)
-        assert np.allclose(U_L[k], I_D, atol=1e-15)
 
 
 @pytest.mark.parametrize("lcu_fixture", ALL_LCU_DATA)
 def test_lcu_reconstruction(lcu_fixture, request):
-    """sum_k c_k * kron(U_R_k, U_L_k) must reconstruct the merging operator."""
-    D, coeffs, U_R, U_L, C, target, mpu = request.getfixturevalue(lcu_fixture)
-
-    M_reconstructed = np.zeros((D * D, D * D), dtype=complex)
-    for k in range(len(coeffs)):
-        if np.abs(coeffs[k]) < 1e-18:
-            continue
-        M_reconstructed += coeffs[k] * np.kron(U_R[k], U_L[k])
-
-    M_ref = mpu.get_merging_operator().reshape(D * D, D * D)
-    assert np.allclose(
-        M_reconstructed, M_ref, atol=1e-8
-    ), f"LCU reconstruction error: {np.max(np.abs(M_reconstructed - M_ref)):.2e}"
-
-
-# =====================================================================
-# Group 10: LCU Unitary Construction
-# =====================================================================
-
-
-@pytest.mark.parametrize("lcu_unitary_fixture", ALL_LCU_UNITARIES)
-def test_lcu_unitary_is_unitary(lcu_unitary_fixture, request):
-    """U must satisfy U @ U† = U† @ U = I."""
-    D, coeffs, U_R, U_L, C, target, mpu, U = request.getfixturevalue(
-        lcu_unitary_fixture
+    """Pauli decomposition must reconstruct the merging operator."""
+    D, h_R, h_L, basis_R, basis_L, labels_R, labels_L, C, mpu = request.getfixturevalue(
+        lcu_fixture
     )
-    dim = U.shape[0]
-    I_full = np.eye(dim, dtype=complex)
-    assert np.allclose(U @ U.conj().T, I_full, atol=1e-10), "U @ U† != I"
-    assert np.allclose(U.conj().T @ U, I_full, atol=1e-10), "U† @ U != I"
+    from mpu_decomposition.utils import build_merge_factors
+    from mpu_decomposition.checks import verify_factored_decomposition
 
+    factors, _ = build_merge_factors(mpu.R_inv, mpu.L_inv)
+    error = verify_factored_decomposition(factors, h_R, h_L, basis_R, basis_L)
 
-def test_lcu_unitary_deterministic(cz_lcu_data):
-    """With the same seed, two calls must produce identical U."""
-    D, coeffs, U_R, U_L, C, target, mpu = cz_lcu_data
-    np.random.seed(42)
-    U1 = CircuitDecomposition._construct_lcu_unitary(target, U_R, U_L)
-    np.random.seed(42)
-    U2 = CircuitDecomposition._construct_lcu_unitary(target, U_R, U_L)
-    assert np.allclose(U1, U2, atol=1e-14)
+    assert error < 1e-10, f"Pauli reconstruction error: {error:.2e}"

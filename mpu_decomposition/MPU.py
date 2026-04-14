@@ -6,7 +6,13 @@ import scipy.linalg as la
 
 # Assuming your pure mathematical validation functions are in checks.py
 from .checks import check_assumption_1, check_mpo_unitarity
-from .utils import get_mpo_site_tensors
+from .utils import (
+    get_mpo_site_tensors,
+    build_merge_factors,
+    factored_lcu_decomposition,
+    pauli_basis,
+    get_merging_operator,
+)
 
 
 class CircuitDecomposition(ABC):
@@ -22,202 +28,45 @@ class CircuitDecomposition(ABC):
         self.r_vec = qtn.Tensor(r_vec, inds=[f"bond_{N}"], tags=["r"])
 
     @staticmethod
-    def get_merging_operator(L_inv: np.ndarray, R_inv: np.ndarray) -> np.ndarray:
+    def _build_lcu_data(R_inv: np.ndarray, L_inv: np.ndarray):
         """
-        Computes the merging operator M from the boundary operators L2 and R2.
-        This operator is crucial for the synthesis of the MPU into a quantum circuit.
-        The merging operator encapsulates the entanglement structure at the boundaries
-        and is derived from the inverses of L2 and R2.
-        """
-        # Validate input dimensions
-        if L_inv.shape != R_inv.shape or L_inv.shape[0] != L_inv.shape[1]:
-            raise ValueError("L2 and R2 must be square matrices of the same dimension.")
-
-        # Compute the merging operator M = |0,0⟩⟨I|(R⁻¹ ⊗ L⁻¹)
-        try:
-            D = L_inv.shape[0]
-
-            M = np.zeros((D, D, D, D), dtype=complex)
-
-            kernel = R_inv.T @ L_inv  # (D, D)
-            M[0, 0, :, :] = kernel
-
-            return M
-        except la.LinAlgError as e:
-            raise ValueError(f"Failed to compute merging operator: {e}")
-
-    @staticmethod
-    def _build_lcu_data(D, R_inv: np.ndarray, L_inv: np.ndarray):
-        """
-        Decompose the merge operator into factored LCU data.
+        Decompose the merge operator into factored Pauli-based LCU data.
 
         The merge operator is:
             M = Σ_m (|0><m| R⁻¹) ⊗ (|0><m| L⁻¹)
 
-        Each factor |0><m| R⁻¹ is a D×D rank-1 matrix. By Lemma 2,
-        any rank-1 matrix s₀|u₀><v₀| can be written as a sum of D
-        unitaries using the D-th roots of unity:
+        Each factor is decomposed independently into the Pauli basis:
+            F_R[m] = Σ_i h_R[m,i] P_i
+            F_L[m] = Σ_j h_L[m,j] P_j
 
-            s₀|u₀><v₀| = Σ_k (s₀/D) U Z_k V†
-
-        where Z_k = diag(1, ω^k, ω^{2k}, ..., ω^{(D-1)k}) and ω = e^{2πi/D}.
-        This works because (1/D) Σ_k ω^{nk} = δ_{n,0}, so the sum over k
-        projects out the first singular vector.
-
-        The factored form means we decompose the right and left factors
-        independently, then pair them. This gives D³ total terms:
-        D bond indices × D right unitaries × D left unitaries.
+        giving:
+            M = Σ_{m,i,j} h_R[m,i] h_L[m,j] (P_i ⊗ P_j)
 
         Parameters
         ----------
-        D     : bond dimension
         R_inv : D×D matrix, inverse of right boundary operator R
         L_inv : D×D matrix, inverse of left boundary operator L
 
         Returns
         -------
-        c_k      : 1D real positive array of LCU coefficients, length d_anc
-        U_R_list : list of D×D unitary matrices for the right ancilla register
-        U_L_list : list of D×D unitary matrices for the left ancilla register
-        C        : normalization constant Σ c_k = ||M||₁
-        target   : normalized state preparation vector √c_k / ||√c_k||
+        h_R      : (n_bonds, n_R) complex array, Pauli coefficients for R factors
+        h_L      : (n_bonds, n_L) complex array, Pauli coefficients for L factors
+        basis_R  : list of Pauli matrices for R
+        basis_L  : list of Pauli matrices for L
+        labels_R : list of Pauli label strings for R
+        labels_L : list of Pauli label strings for L
+        C        : float, LCU 1-norm Σ_{m,i,j} |h_R[m,i]| |h_L[m,j]|
         """
+        factors, n_anc = build_merge_factors(R_inv, L_inv)
+        basis_R, labels_R = pauli_basis(n_anc)
+        basis_L, labels_L = pauli_basis(n_anc)
+        h_R, h_L = factored_lcu_decomposition(factors, basis_R, basis_L)
 
-        # ---- Setup ----
-        # |0> in the D-dimensional bond space
-        e0 = np.zeros(D, dtype=complex)
-        e0[0] = 1.0
+        C = sum(
+            np.sum(np.abs(h_R[m])) * np.sum(np.abs(h_L[m])) for m in range(h_R.shape[0])
+        )
 
-        # Primitive D-th root of unity: ω = e^{2πi/D}
-        omega = np.exp(2j * np.pi / D)
-
-        # Exponent array [0, 1, 2, ..., D-1] used to build Z_k diagonals
-        powers = np.arange(D)
-
-        all_coeffs = []
-        all_U_R = []
-        all_U_L = []
-
-        # ---- Main loop over bond index m ----
-        for m in range(D):
-            # Build the rank-1 factors for this bond index:
-            #   F_R[m] = |0><m| R⁻¹   (D×D, rank 1)
-            #   F_L[m] = |0><m| L⁻¹   (D×D, rank 1)
-            F_R_m = np.outer(e0, R_inv[m, :])
-            F_L_m = np.outer(e0, L_inv[m, :])
-
-            # SVD of each rank-1 factor:
-            #   F = U S V†  with only s[0] nonzero
-            u_r, s_r, vh_r = np.linalg.svd(F_R_m, full_matrices=True)
-            u_l, s_l, vh_l = np.linalg.svd(F_L_m, full_matrices=True)
-
-            # Each factor gets coefficient s₀/D from the roots-of-unity identity.
-            # The paired coefficient is the product of the two.
-            c_r = s_r[0] / D
-            c_l = s_l[0] / D
-            c_rl = c_r * c_l
-
-            # ---- Roots-of-unity decomposition of each factor ----
-            # For each k in [0, D):
-            #   Z_k = diag(ω^0, ω^k, ω^{2k}, ..., ω^{(D-1)k})
-            #   W_k = U Z_k V†
-            #
-            # Then (1/D) Σ_k W_k = U diag(1,0,...,0) V† = |u₀><v₀|
-            # because Σ_k ω^{nk} = D·δ_{n,0}
-
-            for k in range(D):
-                # Diagonal of Z_k for the right factor: [ω^0, ω^k, ω^{2k}, ...]
-                zk = np.power(omega, powers * k)
-                # W_R_k = U_R · Z_k · V_R†
-                # The multiplication u_r * zk scales each column of U by the
-                # corresponding diagonal entry of Z_k
-                Wr_k = (u_r * zk) @ vh_r
-
-                for j in range(D):
-                    # Same construction for the left factor with index j
-                    zj = np.power(omega, powers * j)
-                    Wl_j = (u_l * zj) @ vh_l
-
-                    # This (k,j) pair contributes one term to the LCU:
-                    #   c_rl · (Wr_k ⊗ Wl_j)
-                    # The kron is NOT computed here — we store the two
-                    # unitaries separately for parallel circuit execution
-                    all_coeffs.append(c_rl)
-                    all_U_R.append(Wr_k)
-                    all_U_L.append(Wl_j)
-
-        # ---- Post-processing ----
-        # All coefficients are real positive by construction:
-        # each is a product of two singular values divided by D²
-        all_coeffs = np.array(all_coeffs, dtype=float)
-        C = np.sum(all_coeffs)
-
-        # The LCU ancilla register needs enough states to index every term.
-        # Pad to the next power of two for qubit-based implementation.
-        N_terms = len(all_coeffs)
-        n_anc = int(np.ceil(np.log2(max(N_terms, 2))))
-        d_anc = 2**n_anc
-        pad = d_anc - N_terms
-
-        # Padded entries get identity unitaries and zero coefficients.
-        # They contribute nothing to M but fill the ancilla Hilbert space.
-        I_D = np.eye(D, dtype=complex)
-        all_U_R.extend([I_D] * pad)
-        all_U_L.extend([I_D] * pad)
-        all_coeffs = np.append(all_coeffs, np.zeros(pad))
-
-        # State preparation vector for B|0> = (1/||√c||) Σ_k √c_k |k>
-        # After applying B, postselecting ancilla on |0> and undoing B
-        # gives the correct LCU weighting.
-        target = np.sqrt(all_coeffs)
-        target = target / np.linalg.norm(target)
-
-        return all_coeffs, all_U_R, all_U_L, C, target
-
-    @staticmethod
-    def _construct_lcu_unitary(target, U_R_list, U_L_list):
-        """
-        Constructs the global block-encoding unitary U = (B† ⊗ I) W_ctrl (B ⊗ I).
-
-        Args:
-            target (np.ndarray): The target vector for ancilla preparation (c_i coefficients).
-            U_R_list (list): List of unitary operators acting on the right part of the system.
-            U_L_list (list): List of unitary operators acting on the left part of the system.
-
-        Returns:
-            np.ndarray: The global unitary U of shape (d_anc * d_sys, d_anc * d_sys).
-        """
-        d_anc = len(target)
-        # Each block is np.kron(Ur, Ul), so d_sys is the product of their dimensions
-        d_sys = U_R_list[0].shape[0] * U_L_list[0].shape[0]
-
-        # --- 1. Ancilla Preparation Operator B ---
-        # We use a randomized QR approach to find an orthonormal basis
-        # where the first column is exactly 'target'.
-        A_mat = np.random.randn(d_anc, d_anc) + 1j * np.random.randn(d_anc, d_anc)
-        A_mat[:, 0] = target
-        Q, R_qr = np.linalg.qr(A_mat)
-
-        # Phase correction to ensure B[:, 0] == target
-        # This aligns the internal QR phases with the physical target vector
-        r_diag = np.diag(R_qr)
-        phases = r_diag / np.abs(r_diag)
-        B = Q @ np.diag(phases)
-
-        # --- 2. Select Operator (W_ctrl) ---
-        # W_ctrl = sum_i |i><i|_A ⊗ (Ur_i ⊗ Ul_i)
-        # block_diag creates this sum-of-blocks structure efficiently
-        blocks = [np.kron(Ur, Ul) for Ur, Ul in zip(U_R_list, U_L_list)]
-        W_ctrl = la.block_diag(*blocks)
-
-        # --- 3. Global Transformation ---
-        # Expand B to the full Hilbert space: B_full = B ⊗ Identity_system
-        B_full = np.kron(B, np.eye(d_sys))
-
-        # U = B_full.H @ W_ctrl @ B_full
-        U = B_full.conj().T @ W_ctrl @ B_full
-
-        return U
+        return h_R, h_L, basis_R, basis_L, labels_R, labels_L, C
 
     @abstractmethod
     def synthesize(self) -> qtn.TensorNetwork:
@@ -430,7 +279,7 @@ class UniformMPU(CircuitDecomposition):
 
     def get_merging_operator(self) -> np.ndarray:
         # Call the parent method using the instance attributes
-        return CircuitDecomposition.get_merging_operator(self.L_inv, self.R_inv)
+        return get_merging_operator(self.L_inv, self.R_inv)
 
     def _build_lcu_data(self):
         """
@@ -439,21 +288,9 @@ class UniformMPU(CircuitDecomposition):
         """
         if self._lcu_cache is None:
             self._lcu_cache = CircuitDecomposition._build_lcu_data(
-                self._D,
-                self.R_inv,
-                self.L_inv,  # CORRETTO
+                self.R_inv, self.L_inv
             )
         return self._lcu_cache
-
-    def _construct_lcu_unitary(self):
-        """
-        Constructs the global block-encoding unitary U = (B† ⊗ I) W_ctrl (B ⊗ I).
-        """
-        if self.U is None:
-            self.U = CircuitDecomposition._construct_lcu_unitary(
-                self._lcu_cache[3], self._lcu_cache[1], self._lcu_cache[2]
-            )  # target, U_R_list, U_L_list
-        return self.U
 
     def synthesize(self) -> qtn.TensorNetwork:
         """

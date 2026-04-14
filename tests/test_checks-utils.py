@@ -1,7 +1,7 @@
 import pytest  # pyright: ignore[reportMissingImports]
 import numpy as np  # pyright: ignore[reportMissingImports]
 from mpu_decomposition.checks import check_mpo_unitarity, check_assumption_1
-from mpu_decomposition.utils import optimize_q_unif
+from mpu_decomposition.utils import optimize_q_unif, get_merging_operator
 from mpu_decomposition.MPU import UniformMPU
 
 # ============================================================================
@@ -279,6 +279,8 @@ def test_optimize_q_unif_deterministic(cz_interaction_mpu):
 # ---------------------------------------------------------------------
 # 5.8: Ill-conditioned (semisimple D=5) does not crash
 # ---------------------------------------------------------------------
+
+
 @pytest.mark.parametrize("eps_reg", [1e-6, 1e-8, 1e-12])
 def test_optimize_q_unif_semisimple_no_crash(eps_reg, semisimple_v_mpu):
     """
@@ -292,3 +294,72 @@ def test_optimize_q_unif_semisimple_no_crash(eps_reg, semisimple_v_mpu):
     assert not np.isnan(q_val)
     assert not np.isinf(q_val)
     assert q_val > 0.0
+
+
+# ---------------------------------------------------------------------
+# 6: Merging operator
+# ---------------------------------------------------------------------
+# =====================================================================
+# Group 5: Merging Operator Creation
+# =====================================================================
+
+
+def test_merging_operator_kernel_value(identity_mpu):
+    """
+    For identity MPU (D=1), M[0,0,:,:] must equal R_inv.T @ L_inv exactly.
+    """
+    d, D, A, l_in, r_in = identity_mpu
+    mpu = UniformMPU(A=A, l_vec=l_in, r_vec=r_in, N=4)
+
+    M = mpu.get_merging_operator()
+    expected_kernel = mpu.R_inv.T @ mpu.L_inv
+
+    assert np.allclose(M[0, 0, :, :], expected_kernel, atol=1e-12)
+
+
+def test_merging_operator_only_00_nonzero(cz_interaction_mpu):
+    """
+    By definition, only the M[0,0,:,:] block carries the kernel.
+    All other slices must be exactly zero.
+    """
+    d, D, A, l_in, r_in = cz_interaction_mpu
+    mpu = UniformMPU(A=A, l_vec=l_in, r_vec=r_in, N=4)
+
+    M = mpu.get_merging_operator()
+
+    for i in range(D):
+        for j in range(D):
+            if i == 0 and j == 0:
+                continue
+            assert np.allclose(
+                M[i, j, :, :], 0.0, atol=1e-15
+            ), f"M[{i},{j},:,:] is nonzero"
+
+
+@pytest.mark.parametrize(
+    "mpu_fixture",
+    ["identity_mpu", "cz_interaction_mpu", "semisimple_v_mpu"],
+)
+def test_merging_operator_complex_dtype(mpu_fixture, request):
+    """
+    Output must always be complex regardless of input dtype.
+    """
+    d, D, A, l_in, r_in = request.getfixturevalue(mpu_fixture)
+    mpu = UniformMPU(A=A, l_vec=l_in, r_vec=r_in, N=4)
+
+    M = mpu.get_merging_operator()
+    assert np.iscomplexobj(M)
+
+
+def test_merging_operator_nonsquare_raises():
+    L_inv = np.ones((2, 3))
+    R_inv = np.ones((2, 3))
+    with pytest.raises(ValueError, match="square matrices"):
+        get_merging_operator(L_inv, R_inv)
+
+
+def test_merging_operator_dimension_mismatch_raises():
+    L_inv = np.eye(2)
+    R_inv = np.eye(3)
+    with pytest.raises(ValueError, match="same dimension"):
+        get_merging_operator(L_inv, R_inv)
