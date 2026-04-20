@@ -1,56 +1,14 @@
 import pytest  # pyright: ignore[reportMissingImports]
 import numpy as np  # pyright: ignore[reportMissingImports]
-from mpu_decomposition.checks import check_mpo_unitarity, check_assumption_1
+from mpu_decomposition.checks import (
+    check_mpo_unitarity,
+    check_assumption_1,
+    verify_lcu,
+    verify_merging_unitary,
+)
 from mpu_decomposition.utils import optimize_q_unif, get_merging_operator
 from mpu_decomposition.MPU import UniformMPU
 
-# ============================================================================
-# ============================================================================
-# ============================================================================
-# UNIFORM BULK CASE TESTS
-# ============================================================================
-# ============================================================================
-# ============================================================================
-
-
-# FIXTURES
-# ============================================================================
-
-
-@pytest.fixture(scope="module")
-def identity_q_unif_result(identity_mpu):
-    """Cached optimize_q_unif result for identity MPU."""
-    d, D, A, l_in, r_in = identity_mpu
-    np.random.seed(0)
-    sigma, tau, q_val = optimize_q_unif(A, l_in, r_in)
-    return d, D, A, l_in, r_in, sigma, tau, q_val
-
-
-@pytest.fixture(scope="module")
-def cz_q_unif_result(cz_interaction_mpu):
-    """Cached optimize_q_unif result for CZ MPU."""
-    d, D, A, l_in, r_in = cz_interaction_mpu
-    np.random.seed(0)
-    sigma, tau, q_val = optimize_q_unif(A, l_in, r_in)
-    return d, D, A, l_in, r_in, sigma, tau, q_val
-
-
-@pytest.fixture(scope="module")
-def semisimple_q_unif_result(semisimple_v_mpu):
-    """Cached optimize_q_unif result for semisimple V MPU."""
-    d, D, A, l_in, r_in = semisimple_v_mpu
-    np.random.seed(0)
-    sigma, tau, q_val = optimize_q_unif(A, l_in, r_in)
-    return d, D, A, l_in, r_in, sigma, tau, q_val
-
-
-ALL_Q_UNIF_CACHED = [
-    "identity_q_unif_result",
-    "cz_q_unif_result",
-    "semisimple_q_unif_result",
-]
-
-ALL_LCU_DATA = ["identity_lcu_data", "cz_lcu_data", "semisimple_lcu_data"]
 
 # ============================================================================
 # SECTION 1: MPO UNITARITY CHECKS
@@ -69,21 +27,18 @@ def test_check_mpo_unitarity_valid(mpu_fixture, N, request):
     """
     _, _, A, l_in, r_in = request.getfixturevalue(mpu_fixture)
 
-    is_unitary = check_mpo_unitarity(N_max=N, A_np=A, l_in=l_in, r_in=r_in, tol=1e-6)
-    assert is_unitary
+    check_mpo_unitarity(N_max=N, A_np=A, l_in=l_in, r_in=r_in, tol=1e-6)
 
 
 @pytest.mark.parametrize("N", [1, 5, 10])
 def test_check_mpo_unitarity_failure(random_complex_mpo, N):
     """
-    A strictly random MPO violates unitarity.
+    A strictly random MPO violates unitarity and must raise a ValueError.
     """
     _, _, A, l_in, r_in = random_complex_mpo
 
-    is_unitary = check_mpo_unitarity(
-        N_max=N, A_np=A, l_in=l_in, r_in=r_in, tol=1e-6, early_stop=True
-    )
-    assert not is_unitary
+    with pytest.raises(ValueError, match="Unitarity strictly lost"):
+        check_mpo_unitarity(N_max=N, A_np=A, l_in=l_in, r_in=r_in, tol=1e-6)
 
 
 # ============================================================================
@@ -101,16 +56,15 @@ def test_check_assumption_1_valid(mpu_fixture, request):
     """
     _, D, A, l_in, r_in = request.getfixturevalue(mpu_fixture)
 
-    success, s_left, s_right = check_assumption_1(A, l_in, r_in)
+    s_left, s_right = check_assumption_1(A, l_in, r_in)
 
-    assert success
     assert np.sum(s_left > 1e-12) == D
     assert np.sum(s_right > 1e-12) == D
 
 
 def test_check_assumption_1_deficient_rank():
     """
-    Forces Assumption 1 to fail (d^2 < D).
+    Forces Assumption 1 to fail (d^2 < D), which must raise a ValueError.
     """
     d, D = 2, 5
     np.random.seed(42)
@@ -118,36 +72,33 @@ def test_check_assumption_1_deficient_rank():
     l_in = np.random.randn(D)
     r_in = np.random.randn(D)
 
-    success, s_left, s_right = check_assumption_1(A, l_in, r_in)
-
-    assert not success
-    assert np.sum(s_left > 1e-12) <= d**2
-    assert np.sum(s_right > 1e-12) <= d**2
+    with pytest.raises(ValueError, match="Assumption 1 failed"):
+        check_assumption_1(A, l_in, r_in)
 
 
 def test_check_assumption_1_singular():
     """
-    A degenerate tensor (zeros) must fail injectivity.
+    A degenerate tensor (zeros) must fail injectivity and raise a ValueError.
     """
     d, D = 2, 2
     A = np.zeros((d, d, D, D))
     l_in = np.ones(D)
     r_in = np.ones(D)
 
-    success, s_left, s_right = check_assumption_1(A, l_in, r_in)
-
-    assert not success
-    assert np.all(s_left < 1e-12)
-    assert np.all(s_right < 1e-12)
+    with pytest.raises(ValueError, match="Assumption 1 failed"):
+        check_assumption_1(A, l_in, r_in)
 
 
 # ============================================================================
 # SECTION 3: q_unif optimization
 # ============================================================================
-@pytest.mark.parametrize("cached_fixture", ALL_Q_UNIF_CACHED)
-def test_optimize_q_unif_density_matrices_valid(cached_fixture, request):
-    d, D, A, l_in, r_in, sigma, tau, q_val = request.getfixturevalue(cached_fixture)
-
+@pytest.mark.parametrize(
+    "q_unif_result",
+    ["identity_mpu", "cz_interaction_mpu", "semisimple_v_mpu"],
+    indirect=True,
+)
+def test_optimize_q_unif_density_matrices_valid(q_unif_result):
+    d, D, A, l_in, r_in, sigma, tau, q_val = q_unif_result
     for label, rho in [("sigma", sigma), ("tau", tau)]:
         assert np.allclose(rho, rho.conj().T, atol=1e-8), f"{label} not Hermitian"
         assert np.real(np.trace(rho)) == pytest.approx(1.0, abs=1e-6)
@@ -159,31 +110,30 @@ def test_optimize_q_unif_density_matrices_valid(cached_fixture, request):
 # 5.2: Returned density matrices have correct shape
 # ---------------------------------------------------------------------
 @pytest.mark.parametrize(
-    "cached_fixture, expected_D",
-    [
-        ("identity_q_unif_result", 2),
-        ("cz_q_unif_result", 2),
-        ("semisimple_q_unif_result", 4),
-    ],
+    "q_unif_result",
+    ["identity_mpu", "cz_interaction_mpu", "semisimple_v_mpu"],
+    indirect=True,
 )
-def test_optimize_q_unif_output_shapes(cached_fixture, expected_D, request):
+def test_optimize_q_unif_output_shapes(q_unif_result):
     """
-    Verifies that sigma and tau have shape (d, d) matching the bond dimension.
+    Verifies that sigma and tau have shape (d, d) matching the physical dimension.
     """
-    d, D, A, l_in, r_in, sigma, tau, q_val = request.getfixturevalue(cached_fixture)
-    assert sigma.shape == (expected_D, expected_D)
-    assert tau.shape == (expected_D, expected_D)
+    d, D, A, l_in, r_in, sigma, tau, q_val = q_unif_result
+
+    assert sigma.shape == (d, d), f"Expected sigma shape {(d, d)}, got {sigma.shape}"
+    assert tau.shape == (d, d), f"Expected tau shape {(d, d)}, got {tau.shape}"
 
 
 # ---------------------------------------------------------------------
 # 5.3: Optimized q_val is a finite positive real number
 # ---------------------------------------------------------------------
-@pytest.mark.parametrize("cached_fixture", ALL_Q_UNIF_CACHED)
-def test_optimize_q_unif_returns_finite_positive(cached_fixture, request):
-    """
-    Verifies that the optimized q value is real, finite, and positive.
-    """
-    d, D, A, l_in, r_in, sigma, tau, q_val = request.getfixturevalue(cached_fixture)
+@pytest.mark.parametrize(
+    "q_unif_result",
+    ["identity_mpu", "cz_interaction_mpu", "semisimple_v_mpu"],
+    indirect=True,
+)
+def test_optimize_q_unif_returns_finite_positive(q_unif_result):
+    d, D, A, l_in, r_in, sigma, tau, q_val = q_unif_result
     assert isinstance(q_val, (float, np.floating))
     assert not np.isnan(q_val)
     assert not np.isinf(q_val)
@@ -193,45 +143,51 @@ def test_optimize_q_unif_returns_finite_positive(cached_fixture, request):
 # ---------------------------------------------------------------------
 # 5.4: Identity MPU gives known analytical q_unif
 # ---------------------------------------------------------------------
-def test_optimize_q_unif_identity_analytical(identity_q_unif_result):
+def test_optimize_q_unif_identity_analytical(identity_mpu):
     """
-    For the identity MPU (D=1), the optimal q_unif has a known value.
+    For the identity MPU, the optimal q_unif has a known value.
     The optimizer must recover it.
     """
-    d, D, A, l_in, r_in, sigma, tau, q_val = identity_q_unif_result
+    d, D, A, l_in, r_in = identity_mpu
+
+    # Compute locally
+    np.random.seed(0)
+    _, _, q_val = optimize_q_unif(A, l_in, r_in)
+
     mpu = UniformMPU(A=A, l_vec=l_in, r_vec=r_in, N=4)
     expected_q = mpu.q_unif
+
     assert q_val == pytest.approx(expected_q, abs=1e-4)
 
 
 # ---------------------------------------------------------------------
 # 5.5: Optimizer result <= constructor result (rank-1 boundary)
 # ---------------------------------------------------------------------
-@pytest.mark.parametrize("cached_fixture", ALL_Q_UNIF_CACHED)
-def test_optimize_q_unif_leq_constructor(cached_fixture, request):
-    """
-    The optimized q must be <= the constructor's q_unif, since the optimizer
-    searches over all density matrices (rank >= 1) while the constructor
-    uses rank-1 projectors from the input boundary vectors.
-    """
-    d, D, A, l_in, r_in, sigma, tau, q_optimized = request.getfixturevalue(
-        cached_fixture
-    )
+@pytest.mark.parametrize(
+    "q_unif_result",
+    ["identity_mpu", "cz_interaction_mpu", "semisimple_v_mpu"],
+    indirect=True,
+)
+def test_optimize_q_unif_leq_constructor(q_unif_result):
+    d, D, A, l_in, r_in, sigma, tau, q_optimized = q_unif_result
     mpu = UniformMPU(A=A, l_vec=l_in, r_vec=r_in, N=4)
-    q_constructor = mpu.q_unif
-    assert q_optimized <= q_constructor + 1e-4
+    assert q_optimized <= mpu.q_unif + 1e-4
 
 
 # ---------------------------------------------------------------------
 # 5.6: Self-consistency – recompute q from returned density matrices
 # ---------------------------------------------------------------------
-@pytest.mark.parametrize("cached_fixture", ALL_Q_UNIF_CACHED)
-def test_optimize_q_unif_self_consistency(cached_fixture, request):
+@pytest.mark.parametrize(
+    "q_unif_result",
+    ["identity_mpu", "cz_interaction_mpu", "semisimple_v_mpu"],
+    indirect=True,
+)
+def test_optimize_q_unif_self_consistency(q_unif_result):
     """
     Reconstruct L2 and R2 from the returned sigma/tau using the same
     einsum contractions, then manually compute q and compare to res.fun.
     """
-    d, D, A, l_in, r_in, sigma, tau, q_val = request.getfixturevalue(cached_fixture)
+    d, D, A, l_in, r_in, sigma, tau, q_val = q_unif_result
     eps_reg = 1e-8
 
     T = A
@@ -281,8 +237,6 @@ def test_optimize_q_unif_deterministic(cz_interaction_mpu):
 # ---------------------------------------------------------------------
 # 5.8: Ill-conditioned (semisimple D=5) does not crash
 # ---------------------------------------------------------------------
-
-
 @pytest.mark.parametrize("eps_reg", [1e-6, 1e-8, 1e-12])
 def test_optimize_q_unif_semisimple_no_crash(eps_reg, semisimple_v_mpu):
     """
@@ -301,8 +255,6 @@ def test_optimize_q_unif_semisimple_no_crash(eps_reg, semisimple_v_mpu):
 # ---------------------------------------------------------------------
 # 6: Merging operator
 # ---------------------------------------------------------------------
-
-
 def test_merging_operator_kernel_value(identity_mpu):
     """
     For identity MPU (D=1), M[0,0,:,:] must equal R_inv.T @ L_inv exactly.
@@ -310,7 +262,7 @@ def test_merging_operator_kernel_value(identity_mpu):
     d, D, A, l_in, r_in = identity_mpu
     mpu = UniformMPU(A=A, l_vec=l_in, r_vec=r_in, N=4)
 
-    M = mpu.get_merging_operator()
+    M = mpu._get_merging_operator()
     expected_kernel = mpu.R_inv.T @ mpu.L_inv
 
     assert np.allclose(M[0, 0, :, :], expected_kernel, atol=1e-12)
@@ -324,7 +276,7 @@ def test_merging_operator_only_00_nonzero(cz_interaction_mpu):
     d, D, A, l_in, r_in = cz_interaction_mpu
     mpu = UniformMPU(A=A, l_vec=l_in, r_vec=r_in, N=4)
 
-    M = mpu.get_merging_operator()
+    M = mpu._get_merging_operator()
 
     for i in range(D):
         for j in range(D):
@@ -346,7 +298,7 @@ def test_merging_operator_complex_dtype(mpu_fixture, request):
     d, D, A, l_in, r_in = request.getfixturevalue(mpu_fixture)
     mpu = UniformMPU(A=A, l_vec=l_in, r_vec=r_in, N=4)
 
-    M = mpu.get_merging_operator()
+    M = mpu._get_merging_operator()
     assert np.iscomplexobj(M)
 
 
@@ -362,3 +314,79 @@ def test_merging_operator_dimension_mismatch_raises():
     R_inv = np.eye(3)
     with pytest.raises(ValueError, match="same dimension"):
         get_merging_operator(L_inv, R_inv)
+
+
+# ---------------------------------------------------------------------
+# 7: LCU verification
+# ---------------------------------------------------------------------
+def test_verify_lcu_passes_valid_decomposition(identity_lcu_data):
+    """Valid LCU must pass all internal checks without raising."""
+    D, coeffs, units, C, mpu = identity_lcu_data
+    M_ref = mpu._get_merging_operator().reshape(D**2, D**2)
+    # Should not raise
+    verify_lcu(M_ref, coeffs, units)
+
+
+def test_verify_lcu_fails_non_positive_coefficient(identity_lcu_data):
+    """A negative coefficient must be rejected."""
+    D, coeffs, units, C, mpu = identity_lcu_data
+    M_ref = mpu._get_merging_operator().reshape(D**2, D**2)
+    bad_coeffs = [-abs(coeffs[0])] + list(coeffs[1:])
+    with pytest.raises(ValueError, match="not real positive"):
+        verify_lcu(M_ref, bad_coeffs, units)
+
+
+def test_verify_lcu_fails_non_unitary_matrix(identity_lcu_data):
+    """A non-unitary matrix in the list must be rejected."""
+    D, coeffs, units, C, mpu = identity_lcu_data
+    M_ref = mpu._get_merging_operator().reshape(D**2, D**2)
+    bad_units = [u.copy() for u in units]
+    bad_units[0] = bad_units[0] * 2.0  # breaks unitarity
+    with pytest.raises(ValueError, match="W @ W"):
+        verify_lcu(M_ref, coeffs, bad_units)
+
+
+def test_verify_lcu_fails_wrong_reconstruction(identity_lcu_data):
+    """Correct coefficients and unitaries but wrong target M must be rejected."""
+    D, coeffs, units, C, mpu = identity_lcu_data
+    wrong_M = np.eye(D**2, dtype=complex) * 99.0
+    with pytest.raises(ValueError, match="does not reconstruct"):
+        verify_lcu(wrong_M, coeffs, units)
+
+
+# ---------------------------------------------------------------------
+# 8: Verify Merging Unitary
+# ---------------------------------------------------------------------
+def test_verify_merging_unitary_passes(identity_lcu_data):
+    """
+    For a valid LCU, the merging unitary must correctly embed M/C
+    in the |0> ancilla subspace without raising.
+    """
+    D, coeffs, units, C, mpu = identity_lcu_data
+    M = mpu._get_merging_operator().reshape(D**2, D**2)
+    dim_ancilla = mpu.B.shape[0]
+    # Should not raise
+    verify_merging_unitary(
+        B=mpu.B,
+        W_ctrl=mpu.W_ctrl,
+        M_operator=M,
+        C=C,
+        dim_system=D**2,
+        dim_ancilla=dim_ancilla,
+    )
+
+
+def test_verify_merging_unitary_fails_wrong_C(cz_lcu_data):
+    """Passing a wrong normalization constant C must break post-selection."""
+    D, coeffs, units, C, mpu = cz_lcu_data
+    M = mpu._get_merging_operator().reshape(D**2, D**2)
+    dim_ancilla = mpu.B.shape[0]
+    with pytest.raises(ValueError, match="does not yield M/C"):
+        verify_merging_unitary(
+            B=mpu.B,
+            W_ctrl=mpu.W_ctrl,
+            M_operator=M,
+            C=C * 2.0,  # wrong C
+            dim_system=D**2,
+            dim_ancilla=dim_ancilla,
+        )

@@ -1,47 +1,42 @@
 import numpy as np  # pyright: ignore[reportMissingImports]
 from typing import Tuple
 from quimb import tensor as qtn  # type: ignore
-
+import logging
 from .utils import get_mpo_site_tensors
+
+logger = logging.getLogger(__name__)
 
 
 def check_mpo_unitarity(
-    N_max, A_np, l_in, r_in, tol=1e-6, verbose=False, early_stop=True
-):
+    N_max: int, A_np: np.ndarray, l_in: np.ndarray, r_in: np.ndarray, tol: float = 1e-6
+) -> None:
     """
     Iteratively verifies the unitarity of an MPO chain by checking the ratio
-    between Tr(rho)^2 and Tr(rho^2). For a unitary evolution, this ratio
-    (after dimension scaling) must be 1.0.
+    between Tr(rho)^2 and Tr(rho^2). For a unitary evolution, this ratio must be 1.0.
+    Raises ValueError if unitarity is violated beyond the tolerance.
     """
-
-    # --- 1. Boundary Initialization ---
-    # Defensive copies to prevent global state leakage
     l_vec = qtn.Tensor(l_in.copy(), inds=["bond_0"], tags=["l"])
-    r_vec = qtn.Tensor(r_in.copy(), inds=["bond_0"], tags=["r"])
+    r_vec = r_in.copy()
 
-    # Adjoint boundaries for the double-layer contraction
     l_vec_conj = l_vec.H.reindex({"bond_0": "bond_0_dag"}).retag({"l": "l*"})
-    r_vec_conj = r_vec.H.reindex({"bond_0": "bond_0_dag"}).retag({"r": "r*"})
 
-    # The 'store' represents the accumulated Transfer Matrix environment
-    signle_store = l_vec & l_vec_conj
+    single_store = l_vec & l_vec_conj
     double_store = (
         l_vec
         & l_vec_conj
         & l_vec.reindex({"bond_0": f"bond_{N_max+1}"})
         & l_vec_conj.reindex({"bond_0_dag": f"bond_{N_max+1}_dag"})
     )
-    failed_orders = []
 
-    # --- 2. Iterative Site Evaluation ---
+    r_vec_tensor = qtn.Tensor(r_vec, inds=["bond_0"], tags=["r"])
+    r_vec_conj = r_vec_tensor.H.reindex({"bond_0": "bond_0_dag"}).retag({"r": "r*"})
+
     for N in range(1, N_max + 1):
-        # Update local right boundaries for current chain length N
-        r_loc = r_vec.reindex({"bond_0": f"bond_{N}"})
+        r_loc = r_vec_tensor.reindex({"bond_0": f"bond_{N}"})
         r_loc_dag = r_vec_conj.reindex({"bond_0_dag": f"bond_{N}_dag"})
 
-        # Get MPO site and its conjugate
         A_k, A_k_dag = get_mpo_site_tensors(N, A_np)
-        signle_store &= A_k & A_k_dag.reindex({f"p_out_f_{N}": f"p_in_{N}"})
+        single_store &= A_k & A_k_dag.reindex({f"p_out_f_{N}": f"p_in_{N}"})
 
         A_k_double, A_k_dag_double = get_mpo_site_tensors(N + N_max + 1, A_np)
         double_store &= (
@@ -51,106 +46,137 @@ def check_mpo_unitarity(
             & A_k_dag_double.reindex({f"p_out_f_{N+N_max+1}": f"p_in_{N}"})
         )
 
-        # UU_dag represents the full MPO chain closed by the boundary vectors
-        UU_dag = signle_store.copy() & r_loc & r_loc_dag
+        UU_dag = single_store.copy() & r_loc & r_loc_dag
+        numerator = UU_dag.contract() ** 2
 
-        # --- A. Compute Numerator: (Tr[U U^dagger])^2 ---
-        # Close the physical indices to compute the trace
-        val_tr = UU_dag.contract()
-        numerator = val_tr**2
-
-        # --- B. Compute Denominator: d * Tr[(U U^dagger)^2] ---
-        # Swap indices to connect two copies of the chain for the Tr(rho^2) term
         UU_double = (
             double_store
             & r_loc
             & r_loc_dag
-            & r_vec.reindex({"bond_0": f"bond_{N+N_max+1}"})
+            & r_vec_tensor.reindex({"bond_0": f"bond_{N+N_max+1}"})
             & r_vec_conj.reindex({"bond_0_dag": f"bond_{N+N_max+1}_dag"})
         )
 
-        # Scale by physical dimension d = A_np.shape[0]
-        denominator = A_np.shape[0] ** N * UU_double.contract()
+        denominator = (A_np.shape[0] ** N) * UU_double.contract()
 
-        # --- C. Numerical Evaluation ---
         try:
             check_val = (numerator / denominator).real
         except (ZeroDivisionError, RuntimeWarning):
             check_val = np.nan
 
         error_k = abs(1.0 - float(check_val))
+        logger.debug(
+            f"Site {N:03d} | Unitarity Check: {check_val:.10f} | Error: {error_k:.2e}"
+        )
 
-        if verbose:
-            print(
-                f"Site {N:03d} | Unitarity Check: {check_val:.10f} | Error: {error_k:.2e}"
+        if error_k > tol or np.isnan(error_k):
+            raise ValueError(
+                f"Unitarity strictly lost at N={N}. Error {error_k:.2e} exceeds tolerance {tol}."
             )
 
-        # Validation Logic
-        if error_k > tol or np.isnan(error_k):
-            failed_orders.append((N, error_k))
-            if early_stop and error_k > 1e-1:
-                if verbose:
-                    print(f"CRITICAL: Unitarity lost at N={N}. Stopping.")
-                break
-
-    return failed_orders == []
+    logger.debug(f"MPO Unitarity verified up to N_max={N_max}.")
 
 
 def check_assumption_1(
     A: np.ndarray, l_vec: np.ndarray, r_vec: np.ndarray, tol: float = 1e-12
-) -> Tuple[bool, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray]:
     """
     Verifies Assumption 1 for a uniform MPU.
-    Checks that the map from the bond space to the physical space is injective
-    at the boundaries of the chain.
-
-    Args:
-        A: Array (d, d, D, D) - Bulk tensor (phys_in, phys_out, bond_L, bond_R)
-        l_vec: Array (D,) - Left boundary vector
-        r_vec: Array (D,) - Right boundary vector
-        tol: Numerical threshold for singular values
-
-    Returns:
-        Tuple[bool, np.ndarray, np.ndarray]:
-            - Verification result (True if rank == D on both sides)
-            - Singular values of the left contraction
-            - Singular values of the right contraction
+    Checks that the map from the bond space to the physical space is injective.
+    Raises ValueError if the rank is strictly less than the bond dimension D.
+    Returns singular values for diagnostics.
     """
     D = A.shape[2]
 
-    # 1. Left Boundary: contraction of l_vec over the bond_L index (axis 2)
-    left_map = np.tensordot(l_vec, A, axes=(0, 2))  # Result: (d, d, D)
+    left_map = np.tensordot(l_vec, A, axes=(0, 2))
     left_matrix = left_map.reshape(-1, D)
     s_left = np.linalg.svd(left_matrix, compute_uv=False)
-    is_left_ok = np.sum(s_left > tol) == D
 
-    # 2. Right Boundary: contraction of r_vec over the bond_R index (axis 3)
-    right_map = np.tensordot(A, r_vec, axes=(3, 0))  # Result: (d, d, D)
+    right_map = np.tensordot(A, r_vec, axes=(3, 0))
     right_matrix = right_map.reshape(-1, D)
     s_right = np.linalg.svd(right_matrix, compute_uv=False)
-    is_right_ok = np.sum(s_right > tol) == D
 
-    return is_left_ok and is_right_ok, s_left, s_right
+    rank_left = np.sum(s_left > tol)
+    rank_right = np.sum(s_right > tol)
+
+    if rank_left < D:
+        raise ValueError(
+            f"Assumption 1 failed: Left boundary map is not injective. Rank {rank_left} < D ({D})."
+        )
+    if rank_right < D:
+        raise ValueError(
+            f"Assumption 1 failed: Right boundary map is not injective. Rank {rank_right} < D ({D})."
+        )
+
+    logger.debug("Assumption 1 (Injectivity) verified on both boundaries.")
+    return s_left, s_right
 
 
-def verify_factored_decomposition(M_factors, h_R, h_L, basis_R, basis_L):
-    """Verify reconstruction using uncollected h_R, h_L."""
-    dim_R = basis_R[0].shape[0]
-    dim_L = basis_L[0].shape[0]
-    n_bonds = h_R.shape[0]
+def verify_lcu(
+    M_original: np.ndarray, coefficients: list, unitaries: list, tol: float = 1e-10
+) -> None:
+    """
+    Verifies the validity of an LCU decomposition.
+    Raises ValueError if any mathematical constraint is violated.
+    """
+    M_original = np.asarray(M_original, dtype=complex)
+    M_reconstructed = np.zeros_like(M_original, dtype=complex)
+    I_exact = np.eye(M_original.shape[0], dtype=complex)
 
-    M_direct = np.zeros((dim_R * dim_L, dim_R * dim_L), dtype=complex)
-    for F_R, F_L in M_factors:
-        M_direct += np.kron(F_R, F_L)
+    for idx, (c, W) in enumerate(zip(coefficients, unitaries)):
+        if not (np.isreal(c) and c > 0):
+            raise ValueError(f"Coefficient at index {idx} is not real positive: {c}")
 
-    M_recon = np.zeros_like(M_direct)
-    for m in range(n_bonds):
-        for i, W_R in enumerate(basis_R):
-            if abs(h_R[m, i]) < 1e-15:
-                continue
-            for j, W_L in enumerate(basis_L):
-                c = h_R[m, i] * h_L[m, j]
-                if abs(c) > 1e-15:
-                    M_recon += c * np.kron(W_R, W_L)
+        W = np.asarray(W, dtype=complex)
+        if not np.allclose(W @ W.conj().T, I_exact, atol=tol):
+            raise ValueError(f"Unitary at index {idx} violates W @ W† = I.")
 
-    return np.linalg.norm(M_direct - M_recon)
+        M_reconstructed += c * W
+
+    if not np.allclose(M_reconstructed, M_original, atol=tol):
+        error_norm = np.linalg.norm(M_reconstructed - M_original, ord="fro")
+        raise ValueError(
+            f"LCU sum does not reconstruct M. Frobenius error: {error_norm:.4e}"
+        )
+
+    logger.debug(
+        "LCU verification passed: real/positive coefficients, valid unitaries, exact reconstruction."
+    )
+
+
+def verify_merging_unitary(
+    B: np.ndarray,
+    W_ctrl: np.ndarray,
+    M_operator: np.ndarray,
+    C: float,
+    dim_system: int,
+    dim_ancilla: int,
+    tol: float = 1e-10,
+) -> None:
+    """
+    Verifies that the block encoding correctly embeds M / C in the |0>_A subspace.
+    Assumes tensor product structure: System ⊗ Ancilla.
+    """
+    B_full = np.kron(np.eye(dim_system, dtype=complex), B)
+    B_full_dag = B_full.conj().T
+
+    # L'unitario totale del protocollo LCU richiede B^dagger alla fine
+    U_total = B_full_dag @ W_ctrl @ B_full
+
+    proj_0_ancilla = np.zeros((dim_ancilla, dim_ancilla), dtype=complex)
+    proj_0_ancilla[0, 0] = 1.0
+    P_0 = np.kron(np.eye(dim_system, dtype=complex), proj_0_ancilla)
+
+    # Post-selezione
+    U_post_selected = P_0 @ U_total @ P_0
+    M_target_embedded = np.kron(M_operator / C, proj_0_ancilla)
+
+    if not np.allclose(U_post_selected, M_target_embedded, atol=tol):
+        error = np.linalg.norm(U_post_selected - M_target_embedded, ord="fro")
+        raise ValueError(
+            f"Merging unitary post-selection failed. Operator does not yield M/C. Frobenius error: {error:.4e}"
+        )
+
+    logger.debug(
+        "Merging unitary verification passed: post-selection perfectly extracts M / C."
+    )

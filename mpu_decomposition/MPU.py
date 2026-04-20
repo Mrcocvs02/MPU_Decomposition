@@ -3,6 +3,7 @@ import quimb.tensor as qtn  # type: ignore
 from abc import ABC, abstractmethod
 from typing import List
 import scipy.linalg as la
+from scipy.linalg import qr
 
 # Assuming your pure mathematical validation functions are in checks.py
 from .checks import check_assumption_1, check_mpo_unitarity
@@ -25,63 +26,131 @@ class CircuitDecomposition(ABC):
         self.r_vec = qtn.Tensor(r_vec, inds=[f"bond_{N}"], tags=["r"])
 
     @staticmethod
-    def _build_lcu_data(M: np.ndarray) -> tuple[list, list, float]:
+    def _compute_lcu(M: np.ndarray) -> tuple[list, list, float]:
         """
-        Computes the optimal LCU decomposition of a merging operator M using SVD-based
-        root-of-unity phase factors, returning all LCU terms as precomputed lists.
+        Computes the LCU decomposition M = sum_m c_m W_m using SVD and
+        root-of-unity phases (inverse DFT over singular values).
 
-        The decomposition is:
-            M = Σ_{k,m} c_{k,m} W_{k,m}
-        where:
-            - W_{k,m} = U @ diag(ω^{m*j}) @ Vh, with ω = exp(2πi / D²)
-            - c_{k,m} = S_k * ω^{-m*k} / D²
-        and S_k are the non-zero singular values of M.
+        For each m in {0, ..., D²-1}:
+            W_m = U @ diag(omega^{m*j}) @ Vh        (unitary)
+            c_m = (1/D²) * sum_k S_k * omega^{-m*k} (real, non-negative by construction)
+
+        The c_m are the DFT of the singular value sequence, which are
+        guaranteed real and non-negative.
 
         Parameters
         ----------
-        M : np.ndarray
-            The merging operator (D² x D²) to decompose.
+        M : np.ndarray, shape (D, D) or (D², D²)
+            The merging operator to decompose.
 
         Returns
         -------
-        coefficients : list of complex
-            List of LCU coefficients c_{k,m}
+        coefficients : list of float
+            Real non-negative LCU coefficients c_m (only m with c_m > tol).
         unitaries : list of np.ndarray
-            List of unitary matrices W_{k,m} (each D² x D²)
+            Corresponding unitary matrices W_m.
         C : float
-            The 1-norm of M, i.e., sum of singular values (||M||_1).
+            Nuclear norm of M (= sum of singular values = sum of all c_m).
         """
-        D_squared = M.shape[0] ** 2
+        # --- Reshape and validate ---
+        D_sq = M.shape[0] ** 2
+        M_flat = M.reshape(D_sq, D_sq)
 
-        M = M.reshape(D_squared, D_squared)
-        assert M.shape == (D_squared, D_squared), f"M must be D² x D², got {M.shape}"
+        # --- SVD ---
+        U, S, Vh = np.linalg.svd(M_flat, full_matrices=True)
+        S = np.real(np.asarray(S).ravel())  # singular values are real by definition
+        K = len(S)  # = D_sq (full_matrices=True)
 
-        # SVD on the full D² x D² matrix
-        U, S, Vh = np.linalg.svd(M, full_matrices=True)
+        # --- Nuclear norm ---
+        C = float(np.sum(S[S >= 1e-14]))
 
-        # Ensure S is 1D
-        S = np.asarray(S).ravel()
+        # --- Root of unity ---
+        omega = np.exp(2j * np.pi / D_sq)
 
-        # Compute theoretical 1-norm (nuclear norm)
-        C = np.sum(S[S >= 1e-14])
-
-        # Root of unity: D²-th root, not D-th
-        omega = np.exp(2j * np.pi / D_squared)
-
+        # --- Build LCU terms ---
+        # For each m: c_m = (1/D_sq) * sum_k S_k * omega^{-m*k}
+        # This is a DFT of S, guaranteed real and >= 0
         coefficients = []
         unitaries = []
 
-        for k in range(len(S)):
-            if S[k] < 1e-14:
+        for m in range(D_sq):
+            # Coefficient: DFT of S at frequency m (real by Hermitian symmetry of S)
+            c_m = np.real(sum(S[k] * omega ** (-m * k) for k in range(K))) / D_sq
+
+            # Skip negligible terms
+            if c_m < 1e-14:
                 continue
-            for m in range(D_squared):
-                diag_vals = np.array([omega ** (m * j) for j in range(D_squared)])
-                W = U @ np.diag(diag_vals) @ Vh
-                c = S[k] * (omega ** (-m * k)) / D_squared
-                coefficients.append(c)
-                unitaries.append(W)
+
+            # Unitary W_m
+            diag_vals = np.array([omega ** (m * j) for j in range(D_sq)], dtype=complex)
+            W_m = U @ np.diag(diag_vals) @ Vh
+
+            coefficients.append(float(c_m))
+            unitaries.append(W_m)
 
         return coefficients, unitaries, C
+
+    @staticmethod
+    def _build_merging_unitary(coefficients, unitaries, C):
+        """
+        Builds the two components of the merging unitary U = B† W_ctrl B.
+
+        Given an LCU decomposition of the merging operator M = sum_i c_i W_i,
+        post-selecting the ancilla on |0> after applying U implements M on any
+        state in the image of the isometry V.
+
+        Parameters
+        ----------
+        coefficients : array-like, shape (K,)
+            Positive real coefficients c_i in M = sum_i c_i W_i.
+        unitaries : list of np.ndarray, each shape (dim_system, dim_system)
+            Unitary matrices W_i in the LCU decomposition.
+        C: float, sum of all coefficients
+
+        Returns
+        -------
+        B : np.ndarray, shape (dim_ancilla, dim_ancilla)
+            Ancilla state-preparation unitary satisfying B|0> = (1/C) sum_i sqrt(c_i) |i>.
+        W_ctrl : np.ndarray, shape (dim_system * dim_ancilla, dim_system * dim_ancilla)
+            Controlled unitary W_ctrl = sum_i (W_i)_S ⊗ |i><i|_A.
+        """
+        K = len(coefficients)
+        dim_ancilla = 2 ** int(np.ceil(np.log2(K)))
+        dim_system = int(unitaries[0].shape[0])
+
+        # ------------------------------------------------------------------
+        # Build B: unitary that prepares the ancilla state (Eq. A33)
+        #   B|0>_A = (1/C) * sum_i sqrt(c_i) |i>_A
+        # ------------------------------------------------------------------
+        first_col = np.zeros(dim_ancilla, dtype=complex)
+        first_col[:K] = np.sqrt(coefficients) / np.sqrt(C)
+
+        M = np.eye(dim_ancilla, dtype=complex)
+        M[:, 0] = first_col
+        Q, R = qr(M)
+
+        diag_R = np.diag(R)
+        phases = np.where(np.abs(diag_R) > 1e-14, diag_R / np.abs(diag_R), 1.0)
+        B = Q @ np.diag(phases)
+
+        # ------------------------------------------------------------------
+        # Build W_ctrl: controlled unitary (Eq. A34)
+        #   W_ctrl = sum_i (W_i)_S ⊗ |i><i|_A
+        # For i >= K (unused ancilla states), identity is applied on the system.
+        # ------------------------------------------------------------------
+        dim_total = dim_system * dim_ancilla
+        W_ctrl = np.zeros((dim_total, dim_total), dtype=complex)
+        for i in range(dim_ancilla):
+            proj = np.zeros((dim_ancilla, dim_ancilla), dtype=complex)
+            proj[i, i] = 1.0
+            W_i = (
+                np.array(unitaries[i], dtype=complex)
+                if i < K
+                else np.eye(dim_system, dtype=complex)
+            )
+            W_ctrl += np.kron(W_i, proj)
+
+        return B, W_ctrl
 
     @abstractmethod
     def synthesize(self) -> qtn.TensorNetwork:
@@ -135,6 +204,7 @@ class UniformMPU(CircuitDecomposition):
         r_vec: np.ndarray,
         N: int,
         tol: float = 1e-12,
+        debug: bool = False,
     ):
         """
         Args:
@@ -143,25 +213,15 @@ class UniformMPU(CircuitDecomposition):
             r_vec: Right boundary vector.
             N: Total number of physical sites.
             tol: Numerical tolerance for structural checks.
+            debug: if True gives info and sanity checks.
         """
         # --- 1. Theoretical Validations (Fail-Fast Logic) ---
 
         # Check global unitary property via local left-canonical isometry condition
-        if not check_mpo_unitarity(N, A, l_in=l_vec, r_in=r_vec, tol=tol):
-            raise ValueError(
-                "Instantiation aborted: The bulk tensor 'A' does not satisfy "
-                "the isometry condition."
-            )
+        check_mpo_unitarity(N, A, l_in=l_vec, r_in=r_vec, tol=tol)
 
         # Check injectivity / minimal bond dimension at the boundaries
-        is_injective, s_left, s_right = check_assumption_1(A, l_vec, r_vec, tol=tol)
-
-        if not is_injective:
-            raise ValueError(
-                f"Instantiation aborted: Boundary injectivity failed (Assumption 1).\n"
-                f"Left Singular Values: {s_left}\n"
-                f"Right Singular Values: {s_right}"
-            )
+        s_left, s_right = check_assumption_1(A, l_vec, r_vec, tol=tol)
 
         # --- 2. State Encapsulation ---
 
@@ -182,8 +242,17 @@ class UniformMPU(CircuitDecomposition):
         self.L_inv = np.linalg.inv(self.L)
         self.R_inv = np.linalg.inv(self.R)
 
-        self._lcu_cache = None
+        self.MergingOperator = self._get_merging_operator()
         self.q_unif = self._compute_q_unif()
+
+        self._lcu_cache = None
+        self._build_lcu_data()
+
+        self.B, self.W_ctrl = self._build_merging_unitary()
+
+        if debug:
+            self._verify_lcu()
+            self._verify_merging_unitary()
 
     def _compute_boundary_operators(self) -> tuple[np.ndarray, np.ndarray]:
         """
@@ -270,29 +339,28 @@ class UniformMPU(CircuitDecomposition):
         r"""
         Calculates the entangling power $q_{unif}$ for a Translationally Invariant (TI) MPU.
         Formula: $q_{unif} = \sqrt{\text{Tr}(L_2^{-1}) \text{Tr}(R_2^{-1})}$
-        Reference: Eq. 54/127, Styliaris (2025).
         """
-
-        L2_inv = self.L_inv @ self.L_inv
-        R2_inv = self.R_inv @ self.R_inv
-        if L2_inv.shape[0] != L2_inv.shape[1] or R2_inv.shape[0] != R2_inv.shape[1]:
-            raise ValueError("Boundary operators L2 and R2 must be square matrices.")
-
-        if L2_inv.shape != R2_inv.shape:
+        if self.L_inv.shape != self.R_inv.shape:
             raise ValueError(
-                f"Dimension mismatch: L2 {L2_inv.shape} vs R2 {R2_inv.shape}"
+                f"Dimension mismatch: L2 {self.L_inv.shape} vs R2 {self.R_inv.shape}"
             )
 
-        if np.real(np.trace(self.L)) < 0 or np.real(np.trace(self.R)) < 0:
+        if (
+            np.real(np.trace(self.L @ self.L)) < 0
+            or np.real(np.trace(self.R @ self.R)) < 0
+        ):
             raise ValueError(
                 "Unphysical negative trace detected in boundary operators."
             )
+
+        L2_inv = self.L_inv @ self.L_inv
+        R2_inv = self.R_inv @ self.R_inv
 
         q_unif = np.sqrt(np.trace(R2_inv @ L2_inv.T))
 
         return float(np.real(q_unif))
 
-    def get_merging_operator(self) -> np.ndarray:
+    def _get_merging_operator(self) -> np.ndarray:
         # Call the parent method using the instance attributes
         return get_merging_operator(self.L_inv, self.R_inv)
 
@@ -303,10 +371,17 @@ class UniformMPU(CircuitDecomposition):
         Uses the optimal SVD-based LCU decomposition with root-of-unity phases.
         """
         if self._lcu_cache is None:
-            M = self.get_merging_operator()
-            coeffs, units, C = CircuitDecomposition._build_lcu_data(M)
+            coeffs, units, C = CircuitDecomposition._compute_lcu(self.MergingOperator)
             self._lcu_cache = (coeffs, units, C)
         return self._lcu_cache
+
+    def _build_merging_unitary(self):
+        """
+        Uniform case: the merge operator is the same at every bond.
+        Computed once, cached, and reused for every merge in the tree.
+        Gives the components W_crtl and B to implement the LCU.
+        """
+        return CircuitDecomposition._build_merging_unitary(*self._lcu_cache)
 
     def synthesize(self) -> qtn.TensorNetwork:
         """

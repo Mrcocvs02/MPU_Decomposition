@@ -1,6 +1,7 @@
 import pytest
 import numpy as np
 from mpu_decomposition import UniformMPU
+import mpu_decomposition
 
 
 @pytest.fixture(scope="module")
@@ -98,6 +99,14 @@ def random_complex_mpo():
     l_in = np.random.randn(D) + 1j * np.random.randn(D)
     r_in = np.random.randn(D) + 1j * np.random.randn(D)
     return d, D, A, l_in, r_in
+
+
+@pytest.fixture(scope="module")
+def q_unif_result(request):
+    d, D, A, l_in, r_in = request.getfixturevalue(request.param)
+    np.random.seed(0)
+    sigma, tau, q_val = mpu_decomposition.utils.optimize_q_unif(A, l_in, r_in)
+    return d, D, A, l_in, r_in, sigma, tau, q_val
 
 
 @pytest.fixture(scope="module")

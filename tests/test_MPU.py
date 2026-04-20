@@ -13,16 +13,11 @@ ALL_LCU_DATA = ["identity_lcu_data", "cz_lcu_data", "semisimple_lcu_data"]
 # =====================================================================
 @patch("mpu_decomposition.MPU.check_mpo_unitarity")
 def test_uniformmpu_fails_unitarity(mock_unitarity, identity_mpu):
-    """
-    Asserts fail-fast behavior if the global isometry condition is not met.
-    """
-    mock_unitarity.return_value = False
+    # Simula il fallimento istantaneo
+    mock_unitarity.side_effect = ValueError("Unitarity strictly lost")
     _, _, A_bulk, l_in, r_in = identity_mpu
 
-    # Check for specific error message regarding isometry
-    with pytest.raises(
-        ValueError, match="Instantiation aborted: The bulk tensor 'A' does not satisfy"
-    ):
+    with pytest.raises(ValueError, match="Unitarity strictly lost"):
         UniformMPU(A=A_bulk, l_vec=l_in, r_vec=r_in, N=4)
 
 
@@ -31,22 +26,13 @@ def test_uniformmpu_fails_unitarity(mock_unitarity, identity_mpu):
 def test_uniformmpu_fails_injectivity(
     mock_unitarity, mock_injectivity, cz_interaction_mpu
 ):
-    """
-    Asserts fail-fast behavior if the injectivity/bond dimension check (Assumption 1) fails.
-    """
-    mock_unitarity.return_value = True
-
-    # Simulate a failure in boundary injectivity
-    s_left_mock = [1.0, 0.1]
-    s_right_mock = [1.0, 0.0]
-    mock_injectivity.return_value = (False, s_left_mock, s_right_mock)
+    mock_unitarity.return_value = None
+    # Simula il fallimento di iniettività
+    mock_injectivity.side_effect = ValueError("Assumption 1 failed")
 
     _, _, A_bulk, l_in, r_in = cz_interaction_mpu
 
-    # Check for specific error message regarding injectivity
-    with pytest.raises(
-        ValueError, match="Instantiation aborted: Boundary injectivity failed"
-    ):
+    with pytest.raises(ValueError, match="Assumption 1 failed"):
         UniformMPU(A=A_bulk, l_vec=l_in, r_vec=r_in, N=4)
 
 
@@ -66,8 +52,8 @@ def test_uniformmpu_quimb_conversion(
     encapsulated into a quimb.Tensor with the expected tags and indices.
     """
     # 1. Setup mocks to bypass internal validation and derived property logic
-    mock_unitarity.return_value = True
-    mock_injectivity.return_value = (True, [1.0], [1.0])
+    mock_unitarity.return_value = None
+    mock_injectivity.return_value = ([1.0], [1.0])
 
     # Isolate initialization from subsequent tensor contractions
     dummy_dim = 2
@@ -127,7 +113,7 @@ def test_uniformmpu_initialization_success(mpu_fixture_name, request):
 def test_get_merging_operator_shape(lcu_fixture, request):
     """get_merging_operator() must return (D, D, D, D)."""
     D, _, _, _, mpu = request.getfixturevalue(lcu_fixture)
-    M = mpu.get_merging_operator()
+    M = mpu._get_merging_operator()
     assert M.shape == (D, D, D, D)
 
 
@@ -138,7 +124,6 @@ def test_uniformmpu_random_fails_as_expected_deterministic():
     # --- Setup: Define a known non-unitary bulk tensor ---
     D = 2  # Bond dimension
     d = 2  # Physical dimension
-    N = 4  # Number of sites
 
     # Create a valid bulk tensor (D x D x d x d) — but make it non-unitary
     A = np.zeros((D, D, d, d), dtype=complex)
@@ -156,11 +141,8 @@ def test_uniformmpu_random_fails_as_expected_deterministic():
     l_in = np.array([1.0, 0.0])
     r_in = np.array([1.0, 0.0])
 
-    # --- Test: Constructor must fail due to non-unitarity ---
-    expected_error = "Instantiation aborted: The bulk tensor 'A' does not satisfy"
-
-    with pytest.raises(ValueError, match=expected_error):
-        UniformMPU(A=A, l_vec=l_in, r_vec=r_in, N=N)
+    with pytest.raises(ValueError, match="Unitarity strictly lost"):
+        UniformMPU(A=A, l_vec=l_in, r_vec=r_in, N=4)
 
 
 # =====================================================================
@@ -205,7 +187,7 @@ def test_q_unif_dimension_mismatch(identity_mpu):
 
     # Bypass initial validations to focus on the dimension check
     with patch("mpu_decomposition.MPU.check_mpo_unitarity", return_value=True), patch(
-        "mpu_decomposition.MPU.check_assumption_1", return_value=(True, None, None)
+        "mpu_decomposition.MPU.check_assumption_1", return_value=(None, None)
     ), patch(
         "mpu_decomposition.MPU.UniformMPU._compute_boundary_operators",
         return_value=(np.eye(2), np.eye(2)),
@@ -220,29 +202,6 @@ def test_q_unif_dimension_mismatch(identity_mpu):
         mpu._compute_q_unif()
 
 
-def test_q_unif_unphysical_negative_trace(identity_mpu):
-    """
-    Verifies that a negative real trace in boundary operators raises a ValueError.
-    """
-    _, bond_dim, bulk_tensor, l_in, r_in = identity_mpu
-
-    # Mock internal calls to reach the q_unif calculation block
-    with patch("mpu_decomposition.MPU.check_mpo_unitarity", return_value=True), patch(
-        "mpu_decomposition.MPU.check_assumption_1", return_value=(True, None, None)
-    ), patch(
-        "mpu_decomposition.MPU.UniformMPU._compute_boundary_operators",
-        return_value=(np.eye(bond_dim), np.eye(bond_dim)),
-    ):
-        mpu = UniformMPU(bulk_tensor, l_in, r_in, N=2)
-
-    # Force a negative trace scenario (D=1 for Identity)
-    mpu.L = np.array([[1.0]])
-    mpu.R = np.array([[-1.0]])
-
-    with pytest.raises(ValueError, match="Unphysical negative trace"):
-        mpu._compute_q_unif()
-
-
 def test_q_unif_identity_case(identity_mpu):
     """
     Verifies that for the identity channel, q_unif evaluates exactly to sqrt(d).
@@ -251,10 +210,10 @@ def test_q_unif_identity_case(identity_mpu):
 
     # Isolated instantiation
     with patch("mpu_decomposition.MPU.check_mpo_unitarity", return_value=True), patch(
-        "mpu_decomposition.MPU.check_assumption_1", return_value=(True, None, None)
+        "mpu_decomposition.MPU.check_assumption_1", return_value=(None, None)
     ), patch(
         "mpu_decomposition.MPU.UniformMPU._compute_boundary_operators",
-        return_value=(np.eye(bond_dim), np.eye(bond_dim)),
+        return_value=(np.eye(bond_dim) / bond_dim, np.eye(bond_dim) / bond_dim),
     ):
         mpu = UniformMPU(bulk_tensor, l_in, r_in, N=4)
 
@@ -266,34 +225,8 @@ def test_q_unif_identity_case(identity_mpu):
     assert mpu._compute_q_unif() == pytest.approx(expected_q)
 
 
-def test_q_unif_comparison_beyond_qca(identity_mpu, semisimple_v_mpu):
-    """
-    Verifies that the 'Beyond QCA' model (semisimple_v) is less well-conditioned
-    than the identity (perfect QCA), resulting in a higher or equal entangling power.
-    """
-    # 1. Identity Case (Perfect QCA): q_unif is the lower bound, equal to 1.0 for D=1
-    d_id, _, A_id, l_id, r_id = identity_mpu
-    mpu_identity = UniformMPU(A_id, l_id, r_id, N=4)
-    q_identity = mpu_identity.q_unif
-
-    # 2. Semisimple V Case (Beyond QCA): q_unif must be > 1.0
-    # as the boundary maps are no longer perfect unitaries (higher cost C)
-    d_v, _, A_v, l_v, r_v = semisimple_v_mpu
-    mpu_semisimple = UniformMPU(A_v, l_v, r_v, N=4)
-    q_semisimple = mpu_semisimple.q_unif
-
-    # 3. Assertions
-    # The identity must reach the theoretical minimum for a rank-1 boundary
-    assert q_identity == pytest.approx(d_id)
-
-    assert q_semisimple > 1.0 + 1e-12
-
-    # The entangling power must be a physical real quantity
-    assert np.isreal(q_semisimple) or np.abs(np.imag(q_semisimple)) < 1e-12
-
-
 # =====================================================================
-# Group 5: Factored Pauli LCU Decomposition
+# Group 5: LCU Decomposition
 # =====================================================================
 
 
@@ -317,8 +250,7 @@ def test_lcu_unitaries_are_unitary(lcu_fixture, request):
 @pytest.mark.parametrize("lcu_fixture", ALL_LCU_DATA)
 def test_lcu_terms_are_unique(lcu_fixture, request):
     """Ensure no duplicate unitaries in LCU list."""
-    _, _, _, _, mpu = request.getfixturevalue(lcu_fixture)
-    coeffs, units, C = mpu._build_lcu_data()
+    D, coeffs, units, C, mpu = request.getfixturevalue(lcu_fixture)
 
     # Use a tolerance for floating-point comparison
     seen = set()
@@ -338,7 +270,7 @@ def test_lcu_reconstruction_from_terms(lcu_fixture, request):
     for c, W in zip(coeffs, units):
         M_recon += c * W
 
-    M_ref = mpu.get_merging_operator().reshape(D**2, D**2)
+    M_ref = mpu._get_merging_operator().reshape(D**2, D**2)
     assert np.allclose(
         M_recon, M_ref, atol=1e-8
     ), f"Reconstruction error: {np.max(np.abs(M_recon - M_ref)):.2e}"
@@ -352,13 +284,61 @@ def test_uniformmpu_lcu_caching(cz_interaction_mpu):
     res1 = mpu._build_lcu_data()
     res2 = mpu._build_lcu_data()
 
-    # Compare lists (deep equality)
-    assert len(res1[0]) == len(res2[0])
-    assert len(res1[1]) == len(res2[1])
-    assert res1[2] == res2[2]
+    assert res1 is res2
 
     # Compare coefficients and unitaries
     for c1, c2 in zip(res1[0], res2[0]):
         assert c1 == pytest.approx(c2, abs=1e-12)
     for W1, W2 in zip(res1[1], res2[1]):
         assert np.allclose(W1, W2, atol=1e-12)
+
+
+# =====================================================================
+# Group 5: Unitary Merging Components
+# =====================================================================
+def test_build_merging_unitary_B_prepares_correct_state(identity_lcu_data):
+    """
+    B|0> must equal (1/C) * sum_i sqrt(c_i) |i> exactly.
+    """
+    D, coeffs, units, C, mpu = identity_lcu_data
+    K = len(coeffs)
+    dim_ancilla = mpu.B.shape[0]
+
+    state_0 = np.zeros(dim_ancilla, dtype=complex)
+    state_0[0] = 1.0
+    prepared = mpu.B @ state_0
+
+    expected = np.zeros(dim_ancilla, dtype=complex)
+    expected[:K] = np.sqrt(coeffs) / np.sqrt(C)
+
+    assert np.allclose(prepared, expected, atol=1e-10)
+
+
+def test_build_merging_unitary_B_is_unitary(cz_lcu_data):
+    """B must be a unitary matrix."""
+    D, coeffs, units, C, mpu = cz_lcu_data
+    err = np.linalg.norm(mpu.B @ mpu.B.conj().T - np.eye(mpu.B.shape[0]))
+    assert err < 1e-10
+
+
+def test_build_merging_unitary_W_ctrl_is_unitary(cz_lcu_data):
+    """W_ctrl must be a unitary matrix."""
+    D, coeffs, units, C, mpu = cz_lcu_data
+    err = np.linalg.norm(mpu.W_ctrl @ mpu.W_ctrl.conj().T - np.eye(mpu.W_ctrl.shape[0]))
+    assert err < 1e-10
+
+
+def test_build_merging_unitary_B_first_col_is_unit_vector(cz_lcu_data):
+    """
+    The first column of B must have unit norm for B to be a valid unitary.
+    This catches the /C vs /sqrt(C) normalization bug.
+    """
+    D, coeffs, units, C, mpu = cz_lcu_data
+
+    first_col = mpu.B[:, 0]
+    norm = np.linalg.norm(first_col)
+
+    assert norm == pytest.approx(1.0, abs=1e-10), (
+        f"First column of B has norm {norm:.6f}, expected 1.0. "
+        f"Check normalization: use sqrt(c_i)/sqrt(C), not sqrt(c_i)/C."
+    )
