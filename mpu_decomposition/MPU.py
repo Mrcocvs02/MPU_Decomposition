@@ -8,9 +8,6 @@ import scipy.linalg as la
 from .checks import check_assumption_1, check_mpo_unitarity
 from .utils import (
     get_mpo_site_tensors,
-    build_merge_factors,
-    factored_lcu_decomposition,
-    pauli_basis,
     get_merging_operator,
 )
 
@@ -28,45 +25,63 @@ class CircuitDecomposition(ABC):
         self.r_vec = qtn.Tensor(r_vec, inds=[f"bond_{N}"], tags=["r"])
 
     @staticmethod
-    def _build_lcu_data(R_inv: np.ndarray, L_inv: np.ndarray):
+    def _build_lcu_data(M: np.ndarray) -> tuple[list, list, float]:
         """
-        Decompose the merge operator into factored Pauli-based LCU data.
+        Computes the optimal LCU decomposition of a merging operator M using SVD-based
+        root-of-unity phase factors, returning all LCU terms as precomputed lists.
 
-        The merge operator is:
-            M = Σ_m (|0><m| R⁻¹) ⊗ (|0><m| L⁻¹)
-
-        Each factor is decomposed independently into the Pauli basis:
-            F_R[m] = Σ_i h_R[m,i] P_i
-            F_L[m] = Σ_j h_L[m,j] P_j
-
-        giving:
-            M = Σ_{m,i,j} h_R[m,i] h_L[m,j] (P_i ⊗ P_j)
+        The decomposition is:
+            M = Σ_{k,m} c_{k,m} W_{k,m}
+        where:
+            - W_{k,m} = U @ diag(ω^{m*j}) @ Vh, with ω = exp(2πi / D²)
+            - c_{k,m} = S_k * ω^{-m*k} / D²
+        and S_k are the non-zero singular values of M.
 
         Parameters
         ----------
-        R_inv : D×D matrix, inverse of right boundary operator R
-        L_inv : D×D matrix, inverse of left boundary operator L
+        M : np.ndarray
+            The merging operator (D² x D²) to decompose.
 
         Returns
         -------
-        h_R      : (n_bonds, n_R) complex array, Pauli coefficients for R factors
-        h_L      : (n_bonds, n_L) complex array, Pauli coefficients for L factors
-        basis_R  : list of Pauli matrices for R
-        basis_L  : list of Pauli matrices for L
-        labels_R : list of Pauli label strings for R
-        labels_L : list of Pauli label strings for L
-        C        : float, LCU 1-norm Σ_{m,i,j} |h_R[m,i]| |h_L[m,j]|
+        coefficients : list of complex
+            List of LCU coefficients c_{k,m}
+        unitaries : list of np.ndarray
+            List of unitary matrices W_{k,m} (each D² x D²)
+        C : float
+            The 1-norm of M, i.e., sum of singular values (||M||_1).
         """
-        factors, n_anc = build_merge_factors(R_inv, L_inv)
-        basis_R, labels_R = pauli_basis(n_anc)
-        basis_L, labels_L = pauli_basis(n_anc)
-        h_R, h_L = factored_lcu_decomposition(factors, basis_R, basis_L)
+        D_squared = M.shape[0] ** 2
 
-        C = sum(
-            np.sum(np.abs(h_R[m])) * np.sum(np.abs(h_L[m])) for m in range(h_R.shape[0])
-        )
+        M = M.reshape(D_squared, D_squared)
+        assert M.shape == (D_squared, D_squared), f"M must be D² x D², got {M.shape}"
 
-        return h_R, h_L, basis_R, basis_L, labels_R, labels_L, C
+        # SVD on the full D² x D² matrix
+        U, S, Vh = np.linalg.svd(M, full_matrices=True)
+
+        # Ensure S is 1D
+        S = np.asarray(S).ravel()
+
+        # Compute theoretical 1-norm (nuclear norm)
+        C = np.sum(S[S >= 1e-14])
+
+        # Root of unity: D²-th root, not D-th
+        omega = np.exp(2j * np.pi / D_squared)
+
+        coefficients = []
+        unitaries = []
+
+        for k in range(len(S)):
+            if S[k] < 1e-14:
+                continue
+            for m in range(D_squared):
+                diag_vals = np.array([omega ** (m * j) for j in range(D_squared)])
+                W = U @ np.diag(diag_vals) @ Vh
+                c = S[k] * (omega ** (-m * k)) / D_squared
+                coefficients.append(c)
+                unitaries.append(W)
+
+        return coefficients, unitaries, C
 
     @abstractmethod
     def synthesize(self) -> qtn.TensorNetwork:
@@ -285,11 +300,12 @@ class UniformMPU(CircuitDecomposition):
         """
         Uniform case: the merge operator is the same at every bond.
         Computed once, cached, and reused for every merge in the tree.
+        Uses the optimal SVD-based LCU decomposition with root-of-unity phases.
         """
         if self._lcu_cache is None:
-            self._lcu_cache = CircuitDecomposition._build_lcu_data(
-                self.R_inv, self.L_inv
-            )
+            M = self.get_merging_operator()
+            coeffs, units, C = CircuitDecomposition._build_lcu_data(M)
+            self._lcu_cache = (coeffs, units, C)
         return self._lcu_cache
 
     def synthesize(self) -> qtn.TensorNetwork:

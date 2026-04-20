@@ -50,6 +50,8 @@ ALL_Q_UNIF_CACHED = [
     "semisimple_q_unif_result",
 ]
 
+ALL_LCU_DATA = ["identity_lcu_data", "cz_lcu_data", "semisimple_lcu_data"]
+
 # ============================================================================
 # SECTION 1: MPO UNITARITY CHECKS
 # ============================================================================
@@ -299,9 +301,6 @@ def test_optimize_q_unif_semisimple_no_crash(eps_reg, semisimple_v_mpu):
 # ---------------------------------------------------------------------
 # 6: Merging operator
 # ---------------------------------------------------------------------
-# =====================================================================
-# Group 5: Merging Operator Creation
-# =====================================================================
 
 
 def test_merging_operator_kernel_value(identity_mpu):

@@ -1,5 +1,6 @@
 import pytest
 import numpy as np
+from mpu_decomposition import UniformMPU
 
 
 @pytest.fixture(scope="module")
@@ -97,3 +98,27 @@ def random_complex_mpo():
     l_in = np.random.randn(D) + 1j * np.random.randn(D)
     r_in = np.random.randn(D) + 1j * np.random.randn(D)
     return d, D, A, l_in, r_in
+
+
+@pytest.fixture(scope="module")
+def identity_lcu_data(identity_mpu):
+    d, D, A, l_in, r_in = identity_mpu
+    mpu = UniformMPU(A=A, l_vec=l_in, r_vec=r_in, N=4)
+    coeffs, units, C = mpu._build_lcu_data()
+    return D, coeffs, units, C, mpu
+
+
+@pytest.fixture(scope="module")
+def cz_lcu_data(cz_interaction_mpu):
+    d, D, A, l_in, r_in = cz_interaction_mpu
+    mpu = UniformMPU(A=A, l_vec=l_in, r_vec=r_in, N=4)
+    coeffs, units, C = mpu._build_lcu_data()
+    return D, coeffs, units, C, mpu
+
+
+@pytest.fixture(scope="module")
+def semisimple_lcu_data(semisimple_v_mpu):
+    d, D, A, l_in, r_in = semisimple_v_mpu
+    mpu = UniformMPU(A=A, l_vec=l_in, r_vec=r_in, N=4)
+    coeffs, units, C = mpu._build_lcu_data()
+    return D, coeffs, units, C, mpu
