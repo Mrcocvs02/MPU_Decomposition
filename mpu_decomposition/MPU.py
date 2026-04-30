@@ -30,68 +30,46 @@ class CircuitDecomposition(ABC):
         """
         Computes the LCU decomposition M = sum_m c_m W_m using SVD and
         root-of-unity phases (inverse DFT over singular values).
-
-        For each m in {0, ..., D²-1}:
-            W_m = U @ diag(omega^{m*j}) @ Vh        (unitary)
-            c_m = (1/D²) * sum_k S_k * omega^{-m*k} (real, non-negative by construction)
-
-        The c_m are the DFT of the singular value sequence, which are
-        guaranteed real and non-negative.
-
-        Parameters
-        ----------
-        M : np.ndarray, shape (D, D) or (D², D²)
-            The merging operator to decompose.
-
-        Returns
-        -------
-        coefficients : list of float
-            Real non-negative LCU coefficients c_m (only m with c_m > tol).
-        unitaries : list of np.ndarray
-            Corresponding unitary matrices W_m.
-        C : float
-            Nuclear norm of M (= sum of singular values = sum of all c_m).
         """
-        # --- Reshape and validate ---
-        D_sq = M.shape[0] ** 2
-        M_flat = M.reshape(D_sq, D_sq)
+        D_sq = M.shape[0]
 
-        # --- SVD ---
-        U, S, Vh = np.linalg.svd(M_flat, full_matrices=True)
-        S = np.real(np.asarray(S).ravel())  # singular values are real by definition
-        K = len(S)  # = D_sq (full_matrices=True)
+        # SVD
+        U, S, Vh = np.linalg.svd(M, full_matrices=True)
+        S = np.real(np.asarray(S).ravel())
+        K = len(S)
 
-        # --- Nuclear norm ---
-        C = float(np.sum(S[S >= 1e-14]))
-
-        # --- Root of unity ---
         omega = np.exp(2j * np.pi / D_sq)
 
-        # --- Build LCU terms ---
-        # For each m: c_m = (1/D_sq) * sum_k S_k * omega^{-m*k}
-        # This is a DFT of S, guaranteed real and >= 0
         coefficients = []
         unitaries = []
 
         for m in range(D_sq):
-            # Coefficient: DFT of S at frequency m (real by Hermitian symmetry of S)
-            c_m = np.real(sum(S[k] * omega ** (-m * k) for k in range(K))) / D_sq
+            # 1. Calcolo del coefficiente complesso esatto (nessun np.real)
+            c_m_complex = sum(S[k] * omega ** (-m * k) for k in range(K)) / D_sq
 
-            # Skip negligible terms
-            if c_m < 1e-14:
+            # 2. Il peso LCU deve essere la magnitudo (reale, >= 0)
+            magnitude = np.abs(c_m_complex)
+
+            if magnitude < 1e-14:
                 continue
 
-            # Unitary W_m
+            # 3. Estrazione della fase
+            phase = c_m_complex / magnitude
+
+            # 4. Costruzione dell'unitaria di base
             diag_vals = np.array([omega ** (m * j) for j in range(D_sq)], dtype=complex)
             W_m = U @ np.diag(diag_vals) @ Vh
 
-            coefficients.append(float(c_m))
-            unitaries.append(W_m)
+            # 5. Assorbimento della fase nell'unitaria
+            W_m_absorbed = phase * W_m
 
-        return coefficients, unitaries, C
+            coefficients.append(float(magnitude))
+            unitaries.append(W_m_absorbed)
+
+        return coefficients, unitaries, np.sum(coefficients)
 
     @staticmethod
-    def _build_merging_unitary(coefficients, unitaries, C):
+    def _compute_merging_unitary(coefficients, unitaries, C):
         """
         Builds the two components of the merging unitary U = B† W_ctrl B.
 
@@ -120,7 +98,7 @@ class CircuitDecomposition(ABC):
 
         # ------------------------------------------------------------------
         # Build B: unitary that prepares the ancilla state (Eq. A33)
-        #   B|0>_A = (1/C) * sum_i sqrt(c_i) |i>_A
+        #   B|0>_A = (1/C) * sum_i sqrt(c_i) |i>_A
         # ------------------------------------------------------------------
         first_col = np.zeros(dim_ancilla, dtype=complex)
         first_col[:K] = np.sqrt(coefficients) / np.sqrt(C)
@@ -135,7 +113,7 @@ class CircuitDecomposition(ABC):
 
         # ------------------------------------------------------------------
         # Build W_ctrl: controlled unitary (Eq. A34)
-        #   W_ctrl = sum_i (W_i)_S ⊗ |i><i|_A
+        #   W_ctrl = sum_i (W_i)_S ⊗ |i><i|_A
         # For i >= K (unused ancilla states), identity is applied on the system.
         # ------------------------------------------------------------------
         dim_total = dim_system * dim_ancilla
@@ -148,9 +126,57 @@ class CircuitDecomposition(ABC):
                 if i < K
                 else np.eye(dim_system, dtype=complex)
             )
-            W_ctrl += np.kron(W_i, proj)
+            W_ctrl += np.kron(proj, W_i)
 
         return B, W_ctrl
+
+    @staticmethod
+    def _compute_rotation_params(C: float) -> tuple[int, float]:
+        """
+        Compute ell and phi such that (2*ell+1)*theta = pi/2 exactly (Eq. A47).
+
+        Parameters
+        ----------
+        C : float
+            LCU norm of the merging operator.
+
+        Returns
+        -------
+        ell : int
+        phi : float
+        """
+        arg1 = np.clip(1.0 / C, -1.0, 1.0)
+        ell = int(np.ceil(np.pi / (4 * np.arcsin(arg1)) - 0.5))
+        C_prime = 1.0 / np.sin(np.pi / (4 * ell + 2))
+
+        arg2 = np.clip(C_prime / (C * np.sqrt(2)), -1.0, 1.0)
+        phi = np.arcsin(arg2) - np.pi / 4
+        return ell, phi
+
+    @staticmethod
+    def _build_rotated_lcu(
+        coef: list, unit: list, C: float, phi: float
+    ) -> tuple[list, list, float]:
+        """
+        Extend M to M' = M ⊗ (cos(phi)*I + i*sin(phi)*Z).
+        Makes the Grover exponent ell an integer.
+        """
+        Id = np.eye(2, dtype=complex)
+        Z = np.array([[1.0, 0.0], [0.0, -1.0]], dtype=complex)
+        phase_unitaries = [Id, 1j * Z]
+        phase_coeffs = [np.cos(phi), np.sin(phi)]
+
+        coef_p, unit_p = [], []
+        for c_i, W_i in zip(coef, unit):
+            for p_j, V_j in zip(phase_coeffs, phase_unitaries):
+                raw = c_i * p_j
+                mag = np.abs(raw)
+                if mag < 1e-14:
+                    continue
+                coef_p.append(float(mag))
+                unit_p.append(np.kron(W_i, (raw / mag) * V_j))
+
+        return coef_p, unit_p, sum(coef_p)
 
     @abstractmethod
     def synthesize(self) -> qtn.TensorNetwork:
@@ -228,14 +254,14 @@ class UniformMPU(CircuitDecomposition):
         # Metadata and Dimensions
         self.tol = tol
         self._D = A.shape[2]  # Bond dimension
-        physical_dim = A.shape[0]
+        self._d = A.shape[0]
 
         # Convert raw numpy arrays into quimb Tensors for the graph
         self.A = qtn.Tensor(
             data=A, inds=("p_out", "p_in", "bond_0", "bond_N"), tags=["A"]
         )
 
-        super().__init__(N=N, d=physical_dim, l_vec=l_vec, r_vec=r_vec)
+        super().__init__(N=N, d=self._d, l_vec=l_vec, r_vec=r_vec)
 
         # --- 3. Derived Quantum Properties ---
         self.L, self.R = self._compute_boundary_operators()
@@ -246,13 +272,57 @@ class UniformMPU(CircuitDecomposition):
         self.q_unif = self._compute_q_unif()
 
         self._lcu_cache = None
-        self._build_lcu_data()
-
-        self.B, self.W_ctrl = self._build_merging_unitary()
+        self._merging_unitary_cache = None
+        self.ell = None
+        self.C = None
 
         if debug:
             self._verify_lcu()
             self._verify_merging_unitary()
+
+    def create_local_isometries(self) -> tuple[qtn.Tensor, qtn.Tensor, qtn.Tensor]:
+        """
+        Constructs the local macro-isometries (V_l, V_b, V_r) for a 2-site block
+        by contracting the site tensors with boundary vectors and unitary matrices.
+
+        Returns
+        -------
+        tuple[qtn.Tensor, qtn.Tensor, qtn.Tensor]
+            The left, bulk, and right isometric tensor networks.
+        """
+        A_data = self.A.data
+
+        # Unpack MPO shape. Assuming (p_out, p_in, bond_L, bond_R) convention.
+        # D_bond_pad computation removed as it is dead code in this function.
+        D_sys, _, D_bond, _ = A_data.shape
+
+        # V_joint = V1 ⊗ V2 implies a 2-macro-site logic
+        N_sites_eff = self._N
+
+        # Extract site tensors (returns qtn.Tensor objects)
+        A1_tn, _ = get_mpo_site_tensors(1, A_data)
+        A2_tn, _ = get_mpo_site_tensors(2, A_data)
+
+        # Construct boundary tensors for the internal virtual bond ("bond_1")
+        L_tn = qtn.Tensor(self.L, inds=["ext_L", "bond_1"])
+        R_tn = qtn.Tensor(self.R, inds=["ext_R", "bond_1"])
+
+        # --- Tensor Contractions ---
+        # The @ operator in quimb automatically contracts shared indices.
+
+        # Left boundary isometry
+        V_l = self.l_vec @ A1_tn @ R_tn
+
+        # Right boundary isometry
+        # A2_tn indices: [p_out, p_in, bond_1, bond_2].
+        # Reindex the right boundary vector to contract with "bond_2".
+        V_r = L_tn @ A2_tn @ self.r_vec.reindex({f"bond_{N_sites_eff}": "bond_2"})
+
+        # Bulk isometry
+        # Reindex R_tn so it caps the right physical bond ("bond_2") of A2_tn.
+        V_b = L_tn @ A2_tn @ R_tn.reindex({"bond_1": "bond_2"})
+
+        return V_l, V_b, V_r
 
     def _compute_boundary_operators(self) -> tuple[np.ndarray, np.ndarray]:
         """
@@ -364,6 +434,14 @@ class UniformMPU(CircuitDecomposition):
         # Call the parent method using the instance attributes
         return get_merging_operator(self.L_inv, self.R_inv)
 
+    def _get_rotation_params(self) -> tuple[int, float]:
+        """
+        Compute ell and phi for the uniform merging operator.
+        Wrapper around the abstract _compute_rotation_angle using cached C.
+        """
+        _, _, C = self._build_lcu_data()
+        return CircuitDecomposition._compute_rotation_params(C)
+
     def _build_lcu_data(self):
         """
         Uniform case: the merge operator is the same at every bond.
@@ -379,9 +457,13 @@ class UniformMPU(CircuitDecomposition):
         """
         Uniform case: the merge operator is the same at every bond.
         Computed once, cached, and reused for every merge in the tree.
-        Gives the components W_crtl and B to implement the LCU.
+        Gives the components W_ctrl and B to implement the LCU.
         """
-        return CircuitDecomposition._build_merging_unitary(*self._lcu_cache)
+        if self._merging_unitary_cache is None:
+            coeffs, units, C = self._build_lcu_data()
+            B, W_ctrl = CircuitDecomposition._compute_merging_unitary(coeffs, units, C)
+            self._merging_unitary_cache = (B, W_ctrl)
+        return self._merging_unitary_cache
 
     def synthesize(self) -> qtn.TensorNetwork:
         """

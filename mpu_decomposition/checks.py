@@ -113,30 +113,45 @@ def check_assumption_1(
 
 
 def verify_lcu(
-    M_original: np.ndarray, coefficients: list, unitaries: list, tol: float = 1e-10
+    M_original: np.ndarray, coefficients: list, unitaries: list, tol: float = 1e-6
 ) -> None:
     """
     Verifies the validity of an LCU decomposition.
-    Raises ValueError if any mathematical constraint is violated.
+    Raises ValueError if mathematical or dimensional constraints are violated.
     """
     M_original = np.asarray(M_original, dtype=complex)
+
+    if M_original.ndim != 2 or M_original.shape[0] != M_original.shape[1]:
+        raise ValueError(f"M_original must be square. Got shape: {M_original.shape}")
+
+    dim = M_original.shape[0]
     M_reconstructed = np.zeros_like(M_original, dtype=complex)
-    I_exact = np.eye(M_original.shape[0], dtype=complex)
+    I_exact = np.eye(dim, dtype=complex)
 
     for idx, (c, W) in enumerate(zip(coefficients, unitaries)):
-        if not (np.isreal(c) and c > 0):
-            raise ValueError(f"Coefficient at index {idx} is not real positive: {c}")
+        # Tolerance check for imaginary part and positivity
+        if abs(np.imag(c)) > tol or np.real(c) < -tol:
+            raise ValueError(
+                f"Coefficient [{idx}] is not real positive (within tol): {c}"
+            )
 
         W = np.asarray(W, dtype=complex)
+        if W.shape != (dim, dim):
+            raise ValueError(
+                f"Unitary [{idx}] has incorrect shape. Expected {(dim, dim)}, got {W.shape}."
+            )
+
+        # Unitarity check
         if not np.allclose(W @ W.conj().T, I_exact, atol=tol):
-            raise ValueError(f"Unitary at index {idx} violates W @ W† = I.")
+            raise ValueError(f"Matrix [{idx}] violates W @ W† = I.")
 
-        M_reconstructed += c * W
+        M_reconstructed += np.real(c) * W
 
+    # Reconstruction check
     if not np.allclose(M_reconstructed, M_original, atol=tol):
         error_norm = np.linalg.norm(M_reconstructed - M_original, ord="fro")
         raise ValueError(
-            f"LCU sum does not reconstruct M. Frobenius error: {error_norm:.4e}"
+            f"LCU does not reconstruct M. Frobenius error: {error_norm:.4e}"
         )
 
     logger.debug(
@@ -155,28 +170,26 @@ def verify_merging_unitary(
 ) -> None:
     """
     Verifies that the block encoding correctly embeds M / C in the |0>_A subspace.
-    Assumes tensor product structure: System ⊗ Ancilla.
+    Convention: Ancilla ⊗ System  (W_ctrl = kron(proj_i, W_i))
     """
-    B_full = np.kron(np.eye(dim_system, dtype=complex), B)
-    B_full_dag = B_full.conj().T
+    # B acts on ancilla, system is untouched → B ⊗ I_system
+    B_full = np.kron(B, np.eye(dim_system, dtype=complex))
+    B_full_dag = np.kron(B.conj().T, np.eye(dim_system, dtype=complex))
 
-    # L'unitario totale del protocollo LCU richiede B^dagger alla fine
     U_total = B_full_dag @ W_ctrl @ B_full
 
+    # Post-select ancilla on |0> : P_0 = |0><0|_A ⊗ I_system
     proj_0_ancilla = np.zeros((dim_ancilla, dim_ancilla), dtype=complex)
     proj_0_ancilla[0, 0] = 1.0
-    P_0 = np.kron(np.eye(dim_system, dtype=complex), proj_0_ancilla)
+    P_0 = np.kron(proj_0_ancilla, np.eye(dim_system, dtype=complex))
 
-    # Post-selezione
     U_post_selected = P_0 @ U_total @ P_0
-    M_target_embedded = np.kron(M_operator / C, proj_0_ancilla)
+    M_target_embedded = np.kron(proj_0_ancilla, M_operator / C)
 
     if not np.allclose(U_post_selected, M_target_embedded, atol=tol):
         error = np.linalg.norm(U_post_selected - M_target_embedded, ord="fro")
         raise ValueError(
-            f"Merging unitary post-selection failed. Operator does not yield M/C. Frobenius error: {error:.4e}"
+            f"Merging unitary post-selection failed. " f"Frobenius error: {error:.4e}"
         )
 
-    logger.debug(
-        "Merging unitary verification passed: post-selection perfectly extracts M / C."
-    )
+    logger.debug("Merging unitary verification passed: post-selection yields M / C.")

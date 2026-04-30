@@ -265,7 +265,7 @@ def test_merging_operator_kernel_value(identity_mpu):
     M = mpu._get_merging_operator()
     expected_kernel = mpu.R_inv.T @ mpu.L_inv
 
-    assert np.allclose(M[0, 0, :, :], expected_kernel, atol=1e-12)
+    assert np.allclose(M[0, :], expected_kernel.flatten(), atol=1e-12)
 
 
 def test_merging_operator_only_00_nonzero(cz_interaction_mpu):
@@ -278,13 +278,10 @@ def test_merging_operator_only_00_nonzero(cz_interaction_mpu):
 
     M = mpu._get_merging_operator()
 
-    for i in range(D):
-        for j in range(D):
-            if i == 0 and j == 0:
-                continue
-            assert np.allclose(
-                M[i, j, :, :], 0.0, atol=1e-15
-            ), f"M[{i},{j},:,:] is nonzero"
+    for j in range(D**2):
+        if j == 0:
+            continue
+        assert np.allclose(M[j, :], 0.0, atol=1e-15), f"M[{j},:] is nonzero"
 
 
 @pytest.mark.parametrize(
@@ -363,12 +360,15 @@ def test_verify_merging_unitary_passes(identity_lcu_data):
     in the |0> ancilla subspace without raising.
     """
     D, coeffs, units, C, mpu = identity_lcu_data
+    mpu._build_merging_unitary()
+
+    B, W_ctrl = mpu._merging_unitary_cache
     M = mpu._get_merging_operator().reshape(D**2, D**2)
-    dim_ancilla = mpu.B.shape[0]
+    dim_ancilla = B.shape[0]
     # Should not raise
     verify_merging_unitary(
-        B=mpu.B,
-        W_ctrl=mpu.W_ctrl,
+        B=B,
+        W_ctrl=W_ctrl,
         M_operator=M,
         C=C,
         dim_system=D**2,
@@ -379,12 +379,15 @@ def test_verify_merging_unitary_passes(identity_lcu_data):
 def test_verify_merging_unitary_fails_wrong_C(cz_lcu_data):
     """Passing a wrong normalization constant C must break post-selection."""
     D, coeffs, units, C, mpu = cz_lcu_data
+    mpu._build_merging_unitary()
+
+    B, W_ctrl = mpu._merging_unitary_cache
     M = mpu._get_merging_operator().reshape(D**2, D**2)
-    dim_ancilla = mpu.B.shape[0]
-    with pytest.raises(ValueError, match="does not yield M/C"):
+    dim_ancilla = B.shape[0]
+    with pytest.raises(ValueError, match="Merging unitary post-selection failed."):
         verify_merging_unitary(
-            B=mpu.B,
-            W_ctrl=mpu.W_ctrl,
+            B=B,
+            W_ctrl=W_ctrl,
             M_operator=M,
             C=C * 2.0,  # wrong C
             dim_system=D**2,

@@ -114,7 +114,7 @@ def test_get_merging_operator_shape(lcu_fixture, request):
     """get_merging_operator() must return (D, D, D, D)."""
     D, _, _, _, mpu = request.getfixturevalue(lcu_fixture)
     M = mpu._get_merging_operator()
-    assert M.shape == (D, D, D, D)
+    assert M.shape == (D**2, D**2)
 
 
 def test_uniformmpu_random_fails_as_expected_deterministic():
@@ -301,12 +301,15 @@ def test_build_merging_unitary_B_prepares_correct_state(identity_lcu_data):
     B|0> must equal (1/C) * sum_i sqrt(c_i) |i> exactly.
     """
     D, coeffs, units, C, mpu = identity_lcu_data
+    mpu._build_merging_unitary()
+
+    B, _ = mpu._merging_unitary_cache
     K = len(coeffs)
-    dim_ancilla = mpu.B.shape[0]
+    dim_ancilla = B.shape[0]
 
     state_0 = np.zeros(dim_ancilla, dtype=complex)
     state_0[0] = 1.0
-    prepared = mpu.B @ state_0
+    prepared = B @ state_0
 
     expected = np.zeros(dim_ancilla, dtype=complex)
     expected[:K] = np.sqrt(coeffs) / np.sqrt(C)
@@ -317,14 +320,20 @@ def test_build_merging_unitary_B_prepares_correct_state(identity_lcu_data):
 def test_build_merging_unitary_B_is_unitary(cz_lcu_data):
     """B must be a unitary matrix."""
     D, coeffs, units, C, mpu = cz_lcu_data
-    err = np.linalg.norm(mpu.B @ mpu.B.conj().T - np.eye(mpu.B.shape[0]))
+    mpu._build_merging_unitary()
+
+    B, _ = mpu._merging_unitary_cache
+    err = np.linalg.norm(B @ B.conj().T - np.eye(B.shape[0]))
     assert err < 1e-10
 
 
 def test_build_merging_unitary_W_ctrl_is_unitary(cz_lcu_data):
     """W_ctrl must be a unitary matrix."""
     D, coeffs, units, C, mpu = cz_lcu_data
-    err = np.linalg.norm(mpu.W_ctrl @ mpu.W_ctrl.conj().T - np.eye(mpu.W_ctrl.shape[0]))
+    mpu._build_merging_unitary()
+
+    _, W_ctrl = mpu._merging_unitary_cache
+    err = np.linalg.norm(W_ctrl @ W_ctrl.conj().T - np.eye(W_ctrl.shape[0]))
     assert err < 1e-10
 
 
@@ -334,8 +343,10 @@ def test_build_merging_unitary_B_first_col_is_unit_vector(cz_lcu_data):
     This catches the /C vs /sqrt(C) normalization bug.
     """
     D, coeffs, units, C, mpu = cz_lcu_data
+    mpu._build_merging_unitary()
 
-    first_col = mpu.B[:, 0]
+    B, _ = mpu._merging_unitary_cache
+    first_col = B[:, 0]
     norm = np.linalg.norm(first_col)
 
     assert norm == pytest.approx(1.0, abs=1e-10), (
